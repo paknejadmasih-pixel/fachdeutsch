@@ -8,3 +8,5 @@ adaptive Übungen (Wortschatz, Grammatik, Hören, Sprechen mit Mikrofon, Schreib
 - Installation: Seite in Chrome öffnen → Menü ⋮ → „App installieren“.
 
 Dieses Repository enthält keine persönlichen Daten.
+
+Adresse: https://paknejadmasih-pixel.github.io/fachdeutsch/
