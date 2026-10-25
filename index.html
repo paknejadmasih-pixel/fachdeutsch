@@ -1,0 +1,1915 @@
+<!doctype html>
+<html lang="de"><head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
+<link rel="manifest" href="manifest.webmanifest">
+<link rel="icon" href="icon-192.png">
+<link rel="apple-touch-icon" href="icon-192.png">
+<meta name="mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<style>:root{color-scheme:light;padding-top:env(safe-area-inset-top,0px);padding-bottom:env(safe-area-inset-bottom,0px)}body{margin:0;font:14px/1.4 system-ui,-apple-system,"Segoe UI",sans-serif}img{max-width:100%}[hidden]{display:none!important}</style>
+<script>/* Standalone runtime: provides the same window.claude.use() API the app uses inside Claude,
+   backed by IndexedDB on the phone and the Anthropic API with the user's own key. */
+window.FD_STANDALONE = true;
+(function(){
+  "use strict";
+  var DBN = "fachdeutsch", ST = "docs";
+  var idb = null, mem = new Map(), listeners = new Set();
+  function clone(o){ return o === undefined ? undefined : JSON.parse(JSON.stringify(o)); }
+  function openDB(){ return new Promise(function(res, rej){ var r = indexedDB.open(DBN, 1); r.onupgradeneeded = function(){ r.result.createObjectStore(ST); }; r.onsuccess = function(){ res(r.result); }; r.onerror = function(){ rej(r.error); }; }); }
+  function loadAll(){
+    return openDB().then(function(db){ idb = db; return new Promise(function(res, rej){
+      var rq = idb.transaction(ST).objectStore(ST).openCursor();
+      rq.onsuccess = function(){ var c = rq.result; if (c){ mem.set(c.key, c.value); c.continue(); } else res(); };
+      rq.onerror = function(){ rej(rq.error); };
+    }); });
+  }
+  function persist(path, val){
+    return new Promise(function(res, rej){
+      var tx = idb.transaction(ST, "readwrite"), st = tx.objectStore(ST);
+      if (val === undefined) st.delete(path); else st.put(val, path);
+      tx.oncomplete = function(){ res(); }; tx.onerror = function(){ rej({ code: "unavailable", message: String(tx.error) }); };
+    });
+  }
+  function notify(){ listeners.forEach(function(l){ try { l(); } catch(e){} }); }
+  function parentOf(path){ return path.split("/").slice(0, -1).join("/"); }
+  function snapOf(path){ var v = mem.get(path); return { id: path.split("/").pop(), exists: v !== undefined, data: function(){ return clone(v); }, metadata: { fromCache: false, hasPendingWrites: false } }; }
+  function merge(a, b){ var o = Object.assign({}, a); Object.keys(b).forEach(function(k){ var v = b[k]; if (v && typeof v === "object" && !Array.isArray(v) && o[k] && typeof o[k] === "object" && !Array.isArray(o[k])) o[k] = merge(o[k], v); else o[k] = v; }); return o; }
+  function newId(){ return Date.now().toString(36) + Math.random().toString(36).slice(2, 10); }
+  function docRef(path){
+    return {
+      id: path.split("/").pop(), path: path,
+      get: function(){ return Promise.resolve(snapOf(path)); },
+      set: function(data){ var v = clone(data); mem.set(path, v); notify(); return persist(path, v); },
+      update: function(data){ if (!mem.has(path)) return Promise.reject({ code: "invalid_argument", message: "document missing" }); var v = merge(mem.get(path), clone(data)); mem.set(path, v); notify(); return persist(path, v); },
+      delete: function(){ mem.delete(path); notify(); return persist(path, undefined); },
+      onSnapshot: function(next){ var last = null; var fn = function(){ var k = JSON.stringify(mem.get(path)); if (k === last) return; last = k; next(snapOf(path)); }; listeners.add(fn); setTimeout(fn, 0); return function(){ listeners.delete(fn); }; },
+      collection: function(sub){ return colRef(path + "/" + sub); }
+    };
+  }
+  function colRef(path){
+    function snap(){ var docs = []; mem.forEach(function(v, k){ if (parentOf(k) === path) docs.push(snapOf(k)); }); docs.sort(function(a, b){ return a.id < b.id ? -1 : 1; }); return { docs: docs, size: docs.length, empty: !docs.length, docChanges: function(){ return []; }, metadata: { fromCache: false, hasPendingWrites: false } }; }
+    var q = {
+      path: path,
+      doc: function(id){ return docRef(path + "/" + (id || newId())); },
+      add: function(data){ var r = q.doc(); return r.set(data).then(function(){ return r; }); },
+      get: function(){ return Promise.resolve(snap()); },
+      onSnapshot: function(next){ var last = null; var fn = function(){ var s = snap(); var k = s.docs.map(function(d){ return d.id + ":" + JSON.stringify(mem.get(path + "/" + d.id)); }).join("|"); if (k === last) return; last = k; next(s); }; listeners.add(fn); setTimeout(fn, 0); return function(){ listeners.delete(fn); }; },
+      where: function(){ return q; }, orderBy: function(){ return q; }, limit: function(){ return q; }
+    };
+    return q;
+  }
+  var db = { doc: docRef, collection: colRef };
+  var ready = loadAll().then(function(){ try { if (navigator.storage && navigator.storage.persist) navigator.storage.persist(); } catch(e){} });
+  window.FDLocal = {
+    ready: ready,
+    exportAll: function(){ var o = {}; mem.forEach(function(v, k){ o[k] = v; }); return o; },
+    importAll: function(docs){
+      return ready.then(function(){
+        var keys = Object.keys(docs), jobs = [];
+        keys.forEach(function(k){ var path = k.replace(/^data\/users\/[^/]+\//, "data/users/local/"); var v = clone(docs[k]); mem.set(path, v); jobs.push(persist(path, v)); });
+        notify(); return Promise.all(jobs).then(function(){ return keys.length; });
+      });
+    }
+  };
+
+  /* Claude via the Anthropic Messages API */
+  function getKey(){ try { return localStorage.getItem("fd.apikey") || ""; } catch(e){ return ""; } }
+  function getModel(){ try { return localStorage.getItem("fd.model") || "claude-sonnet-5-5"; } catch(e){ return "claude-sonnet-5-5"; } }
+  function call(input, opts, json){
+    var key = getKey(); if (!key) return Promise.reject({ code: "no_key", message: "no key" });
+    var messages = typeof input === "string" ? [{ role: "user", content: input }] : input;
+    var body = { model: getModel(), max_tokens: 4096, messages: messages };
+    if (json) body.system = "Antworte ausschließlich mit gültigem JSON, ohne Markdown-Codeblock und ohne weiteren Text.";
+    return fetch("https://api.anthropic.com/v1/messages", {
+      method: "POST", signal: opts && opts.signal,
+      headers: { "content-type": "application/json", "x-api-key": key, "anthropic-version": "2023-06-01", "anthropic-dangerous-direct-browser-access": "true" },
+      body: JSON.stringify(body)
+    }).catch(function(e){ throw (e && e.name === "AbortError") ? { code: "cancelled" } : { code: "upstream_error", message: String(e) }; })
+    .then(function(res){
+      if (res.ok) return res.json();
+      return res.json().catch(function(){ return {}; }).then(function(j){
+        var msg = (j && j.error && j.error.message) || "";
+        var code = res.status === 401 || res.status === 403 ? "bad_key" : res.status === 429 ? "rate_limited" : (res.status === 400 && /credit|balance|billing/i.test(msg)) ? "no_credit" : res.status === 404 ? "bad_model" : "upstream_error";
+        throw { code: code, message: msg };
+      });
+    }).then(function(data){
+      var text = (data.content || []).filter(function(b){ return b.type === "text"; }).map(function(b){ return b.text; }).join("");
+      if (!text) throw { code: "empty_completion" };
+      return { text: text, truncated: data.stop_reason === "max_tokens", modelTierApplied: "default" };
+    });
+  }
+  function parseJSON(t){
+    try { return JSON.parse(t); } catch(e){}
+    var m = t.match(/```(?:json)?\s*([\s\S]*?)```/); if (m){ try { return JSON.parse(m[1]); } catch(e){} }
+    var i = [t.indexOf("{"), t.indexOf("[")].filter(function(x){ return x >= 0; }); var j = Math.max(t.lastIndexOf("}"), t.lastIndexOf("]"));
+    if (i.length){ var s = Math.min.apply(null, i); if (s < j){ try { return JSON.parse(t.slice(s, j + 1)); } catch(e){} } }
+    throw { code: "invalid_json", text: t };
+  }
+  var cache = new Map();
+  function sample(input, opts){ return call(input, opts, false); }
+  sample.json = function(input, opts){
+    var ck = opts && opts.cache && typeof opts.cache === "object" ? getModel() + "|" + JSON.stringify(input) : null;
+    if (ck && cache.has(ck)) return Promise.resolve(clone(cache.get(ck)));
+    return call(input, opts, true).then(function(r){ var v = parseJSON(r.text); if (ck) cache.set(ck, v); return v; });
+  };
+  sample.limits = function(){ return Promise.resolve({ maxPromptBytes: 262144 }); };
+  var user = { id: function(){ return Promise.resolve("local"); }, isOwner: function(){ return true; }, canEdit: function(){ return true; }, can: function(){ return true; } };
+  window.claude = { use: function(name){ if (name === "sample") return Promise.resolve(sample); if (name === "db") return ready.then(function(){ return db; }, function(){ return null; }); if (name === "user") return Promise.resolve(user); return Promise.resolve(null); } };
+})();
+</script>
+</head><body>
+<title>Fachdeutsch-Trainer</title>
+<meta name="claude:viewport-fit-sides" content="cover">
+<meta name="theme-color" content="#18212b">
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Barlow+Condensed:wght@600;700&family=IBM+Plex+Sans:wght@400;500;600&family=IBM+Plex+Mono:wght@400;500&family=Vazirmatn:wght@400;600&display=swap">
+<style>
+/* Layout: a single-column inspection protocol (Prüfprotokoll) — sticky tab strip, sections ruled like a measurement sheet; weak points as tolerance bars, the level path as a measuring scale A1–C2. */
+:root{
+  --bg:#eceff2; --surface:#ffffff; --ink:#18212b; --muted:#5a6676; --line:#d2d8df; --line-strong:#9aa6b3;
+  --accent:#d9531b; --accent-ink:#ffffff; --accent-soft:#fbe6dc;
+  --good:#2c8653; --warn:#b97f0f; --bad:#c03a3a; --good-soft:#dcefe3; --bad-soft:#f6dddd;
+  --s-w:#2f6db5; --s-g:#7a4fb0; --s-h:#1f8a8a; --s-s:#d9531b; --s-sc:#b98a12;
+  --f-display:"Barlow Condensed","Arial Narrow",Arial,sans-serif;
+  --f-body:"IBM Plex Sans",system-ui,-apple-system,"Segoe UI",sans-serif;
+  --f-mono:"IBM Plex Mono",ui-monospace,Menlo,Consolas,monospace;
+  --f-fa:"Vazirmatn",Tahoma,"Segoe UI",sans-serif;
+}
+@media (prefers-color-scheme: dark){:root:not([data-theme="light"]){
+  --bg:#10151b; --surface:#19212a; --ink:#e4e9ee; --muted:#93a0ae; --line:#2a3440; --line-strong:#4a5767;
+  --accent:#ff7a3d; --accent-ink:#1a0d06; --accent-soft:#3a2216;
+  --good:#4fbf80; --warn:#e3a93a; --bad:#ef6b6b; --good-soft:#163024; --bad-soft:#3a1d1d;
+  --s-w:#6aa5ec; --s-g:#b18ae6; --s-h:#4cc4c4; --s-s:#ff8a52; --s-sc:#e2bb45; color-scheme:dark}}
+:root[data-theme="dark"]{
+  --bg:#10151b; --surface:#19212a; --ink:#e4e9ee; --muted:#93a0ae; --line:#2a3440; --line-strong:#4a5767;
+  --accent:#ff7a3d; --accent-ink:#1a0d06; --accent-soft:#3a2216;
+  --good:#4fbf80; --warn:#e3a93a; --bad:#ef6b6b; --good-soft:#163024; --bad-soft:#3a1d1d;
+  --s-w:#6aa5ec; --s-g:#b18ae6; --s-h:#4cc4c4; --s-s:#ff8a52; --s-sc:#e2bb45; color-scheme:dark}
+
+*{box-sizing:border-box}
+[hidden]{display:none!important}
+body{background:var(--bg);color:var(--ink);font-family:var(--f-body);font-size:15px;line-height:1.5}
+body::before{content:"";position:fixed;inset:0 0 auto;height:env(safe-area-inset-top,0px);z-index:10;background:var(--surface)}
+.wrap{max-width:760px;margin:0 auto;padding-left:max(16px,env(safe-area-inset-left,0px));padding-right:max(16px,env(safe-area-inset-right,0px));padding-block:0 56px}
+
+header.top{position:sticky;top:env(safe-area-inset-top,0px);z-index:5;background:var(--surface);border-bottom:1px solid var(--line)}
+header.top .inner{max-width:760px;margin:0 auto;padding-left:max(16px,env(safe-area-inset-left,0px));padding-right:max(16px,env(safe-area-inset-right,0px));padding-block:10px 0}
+.brand{display:flex;align-items:baseline;justify-content:space-between;gap:12px}
+.brand h1{font-family:var(--f-display);font-weight:700;font-size:26px;letter-spacing:.02em;margin:0;text-transform:uppercase;line-height:1}
+.brand h1 b{color:var(--accent);font-weight:700}
+.proto{font-family:var(--f-mono);font-size:11px;color:var(--muted);white-space:nowrap;overflow:hidden;text-overflow:ellipsis;min-width:0}
+.tabs{display:flex;gap:2px;overflow-x:auto;margin-top:8px;scrollbar-width:none}
+.tabs::-webkit-scrollbar{display:none}
+.tab{flex:0 0 auto;border:0;background:none;color:var(--muted);font:600 13px/1 var(--f-body);padding:10px 11px 11px;border-bottom:3px solid transparent;cursor:pointer}
+.tab[aria-selected="true"]{color:var(--ink);border-bottom-color:var(--accent)}
+.tab:focus-visible,button:focus-visible,select:focus-visible,textarea:focus-visible,input:focus-visible{outline:2px solid var(--accent);outline-offset:2px}
+
+.banner{margin-top:14px;padding:10px 12px;border:1px solid var(--warn);background:var(--surface);font-size:13px}
+section{margin-top:22px}
+.sec-h{display:flex;align-items:baseline;justify-content:space-between;gap:10px;border-bottom:2px solid var(--ink);padding-bottom:4px;margin-bottom:12px}
+.sec-h h2{font-family:var(--f-display);font-size:20px;text-transform:uppercase;letter-spacing:.04em;margin:0;text-wrap:balance}
+.sec-h .meta{font-family:var(--f-mono);font-size:11px;color:var(--muted);text-transform:uppercase;letter-spacing:.06em;text-align:right}
+p.lead{margin:0 0 12px;color:var(--muted);max-width:62ch}
+.fa{font-family:var(--f-fa);direction:rtl;text-align:right;unicode-bidi:isolate;line-height:1.9;font-size:15px}
+.fa-hint{font-family:var(--f-fa);direction:rtl;text-align:right;color:var(--muted);font-size:13.5px;line-height:1.8;margin:0 0 12px}
+
+.kpis{display:grid;grid-template-columns:repeat(4,1fr);border:1px solid var(--line);background:var(--surface)}
+.kpi{padding:12px;border-right:1px solid var(--line);min-width:0}
+.kpi:last-child{border-right:0}
+.kpi .l{font-size:11px;text-transform:uppercase;letter-spacing:.07em;color:var(--muted)}
+.kpi .v{font-family:var(--f-display);font-size:30px;font-weight:700;line-height:1.05;font-variant-numeric:tabular-nums}
+.kpi .v small{font-size:15px;color:var(--muted);font-weight:600}
+@media (max-width:520px){.kpis{grid-template-columns:repeat(2,1fr)}.kpi:nth-child(2){border-right:0}.kpi:nth-child(-n+2){border-bottom:1px solid var(--line)}}
+
+.btn{display:inline-flex;align-items:center;justify-content:center;gap:8px;border:1px solid var(--ink);background:var(--surface);color:var(--ink);font:600 14px/1.15 var(--f-body);padding:12px 16px;cursor:pointer;min-height:44px;text-align:center}
+.btn.primary{background:var(--accent);border-color:var(--accent);color:var(--accent-ink)}
+.btn.ghost{border-color:var(--line-strong)}
+.btn:disabled{opacity:.45;cursor:not-allowed}
+.btn.sm{padding:7px 10px;min-height:34px;font-size:13px}
+.row{display:flex;flex-wrap:wrap;gap:8px;align-items:center}
+.row.stretch>.btn{flex:1 1 160px}
+
+/* Speaker */
+.spk{display:inline-flex;align-items:center;justify-content:center;gap:4px;min-width:38px;height:38px;padding:0 9px;border:1px solid var(--line-strong);background:var(--surface);color:var(--ink);cursor:pointer;flex:0 0 auto}
+.spk svg{width:18px;height:18px;display:block}
+.spk span{font:600 10px/1 var(--f-mono);letter-spacing:.04em}
+.spk.on{background:var(--accent);border-color:var(--accent);color:var(--accent-ink)}
+.say{display:flex;gap:10px;align-items:flex-start}
+.say>.t{flex:1;min-width:0;overflow-wrap:anywhere}
+.en-line{display:flex;gap:10px;align-items:flex-start;color:var(--muted);font-size:14px;margin-top:8px}
+.en-line>.t{flex:1;min-width:0;overflow-wrap:anywhere}
+.en-line b{font:600 10px/1.6 var(--f-mono);letter-spacing:.06em;margin-right:6px}
+.ttsbar{display:flex;flex-wrap:wrap;gap:10px 16px;align-items:center;padding:10px 12px;border:1px solid var(--line);background:var(--surface);font-size:13px;margin-top:16px}
+.ttsbar label{display:inline-flex;gap:8px;align-items:center;font-weight:600;cursor:pointer}
+.ttsbar input[type=checkbox]{width:18px;height:18px;accent-color:var(--accent)}
+.seg{display:inline-flex;border:1px solid var(--line-strong);flex-wrap:wrap}
+.seg button{border:0;background:var(--surface);color:var(--muted);font:600 13px/1 var(--f-body);padding:9px 11px;cursor:pointer;min-height:38px}
+.seg button+button{border-left:1px solid var(--line-strong)}
+.seg button[aria-pressed="true"]{background:var(--ink);color:var(--bg)}
+
+/* Tolerance bars */
+.tol{display:grid;border:1px solid var(--line);background:var(--surface)}
+.tol-row{display:grid;grid-template-columns:minmax(0,1.25fr) minmax(0,2fr) 56px;gap:12px;align-items:center;padding:10px 12px;border:0;border-bottom:1px solid var(--line);cursor:pointer;background:none;text-align:left;color:inherit;font:inherit;width:100%}
+.tol-row:last-child{border-bottom:0}
+.tol-name{font-weight:600;font-size:14px;min-width:0}
+.tol-name span{display:block;font-weight:400;font-size:12px;color:var(--muted)}
+.bar{position:relative;height:14px;background:repeating-linear-gradient(90deg,transparent 0 calc(10% - 1px),var(--line) calc(10% - 1px) 10%);border:1px solid var(--line)}
+.bar i{position:absolute;inset:0 auto 0 0;background:var(--good)}
+.bar i.w{background:var(--warn)} .bar i.b{background:var(--bad)}
+.bar.tolline::after{content:"";position:absolute;top:-4px;bottom:-4px;left:20%;border-left:2px dashed var(--ink);opacity:.7}
+.tol-val{font-family:var(--f-mono);font-size:13px;text-align:right;font-variant-numeric:tabular-nums}
+.tol-legend{font-size:12px;color:var(--muted);margin-top:6px}
+.tol-detail{padding:4px 12px 12px;border-bottom:1px solid var(--line);background:var(--bg)}
+.tol-detail:last-child{border-bottom:0}
+
+/* Daily plan */
+.plan{border:1px solid var(--line);background:var(--surface)}
+.pl{display:grid;grid-template-columns:minmax(0,1fr) auto;gap:6px 12px;padding:12px;border-bottom:1px solid var(--line);align-items:center}
+.pl:last-child{border-bottom:0}
+.pl .nm{font-weight:600;display:flex;gap:8px;align-items:center}
+.pl .nm i{width:10px;height:10px;display:inline-block;flex:0 0 auto}
+.pl .mn{font-family:var(--f-mono);font-size:12px;color:var(--muted);font-variant-numeric:tabular-nums}
+.pl .pb{grid-column:1 / -1;height:8px;background:var(--line);position:relative}
+.pl .pb b{position:absolute;inset:0 auto 0 0;display:block}
+.pl.done .nm::after{content:"✓";color:var(--good);font-weight:700}
+
+/* Level scale */
+.scale{border:1px solid var(--line);background:var(--surface);padding:14px 12px 10px}
+.scale svg{display:block;width:100%;height:auto}
+.verdict{border-left:4px solid var(--good);background:var(--surface);padding:12px;display:grid;gap:6px}
+.verdict.knapp{border-left-color:var(--warn)} .verdict.nein{border-left-color:var(--bad)}
+.verdict .big{font-family:var(--f-display);font-size:24px;font-weight:700;line-height:1.1}
+
+.chip{display:inline-block;font:500 11px/1 var(--f-mono);text-transform:uppercase;letter-spacing:.05em;padding:4px 6px;border:1px solid var(--line-strong);color:var(--muted);white-space:nowrap}
+.chip.acc{border-color:var(--accent);color:var(--accent)}
+.chip.bad{border-color:var(--bad);color:var(--bad)}
+.chips{display:flex;flex-wrap:wrap;gap:6px}
+.pick{border:1px solid var(--line-strong);background:var(--surface);color:var(--ink);font:500 13px/1.2 var(--f-body);padding:8px 10px;cursor:pointer;min-height:36px}
+.pick[aria-pressed="true"]{background:var(--ink);color:var(--bg);border-color:var(--ink)}
+
+.chart{border:1px solid var(--line);background:var(--surface);padding:10px 8px 6px}
+.chart svg{display:block;width:100%;height:auto}
+.legend{display:flex;flex-wrap:wrap;gap:6px 14px;font-size:12px;color:var(--muted);padding:4px}
+.legend i{display:inline-block;width:10px;height:10px;margin-right:5px;vertical-align:-1px}
+
+/* Card */
+.card{border:1px solid var(--ink);background:var(--surface)}
+.card .strip{display:flex;justify-content:space-between;gap:8px;padding:8px 12px;border-bottom:1px solid var(--line);font-family:var(--f-mono);font-size:11px;color:var(--muted);text-transform:uppercase;letter-spacing:.05em}
+.card .front{padding:20px 16px;font-size:20px;line-height:1.4;font-weight:500;min-height:100px}
+.card .back{padding:16px;border-top:1px dashed var(--line-strong);background:var(--bg);font-size:17px}
+.card .back .full{font-size:15px;margin-top:6px}
+.rulebtn{display:flex;width:100%;gap:10px;align-items:flex-start;justify-content:space-between;text-align:left;background:none;border:0;border-top:1px dashed var(--line-strong);padding:10px 0 0;margin-top:12px;color:var(--ink);font:inherit;font-size:14px;cursor:pointer}
+.rulebtn .t{flex:1;min-width:0;overflow-wrap:anywhere}
+.rulebtn[aria-expanded="true"] .chip{background:var(--accent);color:var(--accent-ink)}
+.detail{margin-top:10px;border:1px solid var(--line);background:var(--surface);padding:12px;display:grid;gap:14px;font-size:15px}
+.detail h4{margin:0 0 6px;font:600 11px/1 var(--f-mono);text-transform:uppercase;letter-spacing:.07em;color:var(--muted)}
+.detail h4.fa{font-family:var(--f-fa);font-size:13px;letter-spacing:0;text-transform:none}
+.detail .exm+.exm{margin-top:8px}
+.detail .exm .muted{font-size:13px;margin-top:2px}
+.fa-box{border-right:3px solid var(--s-g);padding:8px 12px 8px 8px;background:var(--bg)}
+.merk{border-left:3px solid var(--accent);padding:8px 10px;background:var(--accent-soft)}
+.grades{display:grid;grid-template-columns:repeat(4,1fr);border-top:1px solid var(--line)}
+.grades button{border:0;border-right:1px solid var(--line);background:var(--surface);color:var(--ink);padding:12px 4px;font:600 13px/1.2 var(--f-body);cursor:pointer;min-height:56px}
+.grades button:last-child{border-right:0}
+.grades button small{display:block;font:400 11px/1.3 var(--f-mono);color:var(--muted);margin-top:3px}
+.grades button.g0{color:var(--bad)} .grades button.g5{color:var(--good)}
+.progress{height:4px;background:var(--line);margin-bottom:10px}
+.progress i{display:block;height:100%;background:var(--accent)}
+
+/* Forms */
+label.f{display:grid;gap:4px;font-size:13px;font-weight:600}
+label.f span.h{font-weight:400;color:var(--muted);font-size:12px}
+.fl{display:grid;gap:6px;font-size:13px;font-weight:600}
+input[type=text],input[type=number],input[type=date],textarea,select{font:inherit;font-size:16px;color:var(--ink);background:var(--surface);border:1px solid var(--line-strong);padding:10px 12px;width:100%;border-radius:0}
+textarea{min-height:120px;resize:vertical}
+.form{display:grid;gap:14px}
+.grid2{display:grid;grid-template-columns:1fr 1fr;gap:12px}
+@media (max-width:520px){.grid2{grid-template-columns:1fr}}
+
+.list{border:1px solid var(--line);background:var(--surface)}
+.li{display:grid;grid-template-columns:minmax(0,1fr) auto;gap:10px;padding:10px 12px;border-bottom:1px solid var(--line);align-items:start}
+.li:last-child{border-bottom:0}
+.li .a{min-width:0;overflow-wrap:anywhere}
+.li .a .q{font-weight:500}
+.li .a .r{color:var(--muted);font-size:14px}
+.li .x{display:flex;gap:6px;align-items:center;flex-wrap:wrap;justify-content:flex-end}
+.empty{padding:18px 12px;color:var(--muted);font-size:14px}
+.err{color:var(--bad);font-size:13px} .ok{color:var(--good);font-size:13px} .muted{color:var(--muted)}
+.wrong{color:var(--bad);text-decoration:line-through;text-decoration-thickness:1px}
+.miss{color:var(--bad);font-weight:600;text-decoration:underline dotted}
+.right{color:var(--good);font-weight:600}
+.fix{display:grid;grid-template-columns:auto minmax(0,1fr);gap:10px;padding:10px 12px;border-bottom:1px solid var(--line);align-items:start}
+.fix:last-child{border-bottom:0}
+.fix input[type=checkbox]{margin-top:10px;width:18px;height:18px;accent-color:var(--accent)}
+.corrected{border-left:3px solid var(--good);padding:10px 12px;background:var(--surface);white-space:pre-wrap}
+.box{border:1px solid var(--line);background:var(--surface);padding:12px;display:grid;gap:10px}
+.box + .box{margin-top:10px}
+.qn{font-family:var(--f-mono);font-size:11px;color:var(--muted);text-transform:uppercase;letter-spacing:.05em}
+.sol{background:var(--bg);padding:10px}
+.crit{display:grid;grid-template-columns:repeat(4,1fr);border:1px solid var(--line)}
+.crit div{padding:8px;border-right:1px solid var(--line);font-size:12px;color:var(--muted);min-width:0}
+.crit div:last-child{border-right:0}
+.crit b{display:block;font:700 20px/1.1 var(--f-display);color:var(--ink)}
+@media (max-width:520px){.crit{grid-template-columns:repeat(2,1fr)}.crit div:nth-child(2){border-right:0}.crit div:nth-child(-n+2){border-bottom:1px solid var(--line)}}
+.opts{display:grid;gap:8px}
+.opt{border:1px solid var(--line-strong);background:var(--surface);color:var(--ink);font:500 16px/1.35 var(--f-body);padding:12px 14px;text-align:left;cursor:pointer;min-height:48px}
+.opt.idk{color:var(--muted);font-size:14px}
+.opt.sel-ok{border-color:var(--good);background:var(--good-soft)}
+.opt.sel-bad{border-color:var(--bad);background:var(--bad-soft)}
+.wiz-steps{display:flex;gap:4px;margin-top:16px}
+.wiz-steps i{flex:1;height:4px;background:var(--line)}
+.wiz-steps i.on{background:var(--accent)}
+.help{border:1px dashed var(--line-strong);padding:10px 12px;font-size:13px;background:var(--surface)}
+#saveState.ok{color:var(--good)} #saveState.busy{color:var(--muted)} #saveState.bad{color:var(--bad);font-weight:600}
+.toast{position:fixed;left:50%;transform:translateX(-50%);bottom:calc(16px + env(safe-area-inset-bottom,0px));background:var(--ink);color:var(--bg);padding:10px 14px;font-size:14px;z-index:20;max-width:calc(100% - 32px)}
+@media (prefers-reduced-motion:no-preference){.card,.box.anim{animation:in .18s ease-out}@keyframes in{from{transform:translateY(4px)}to{transform:none}}}
+</style>
+
+<header class="top">
+  <div class="inner">
+    <div class="brand">
+      <h1>Fach<b>deutsch</b></h1>
+      <div style="display:grid;justify-items:end;gap:2px;min-width:0"><div class="proto" id="protoLine">Prüfprotokoll</div><div class="proto" id="saveState" role="status" aria-live="polite"></div></div>
+    </div>
+    <nav class="tabs" id="tabs" role="tablist" aria-label="Bereiche">
+      <button class="tab" role="tab" data-view="heute" aria-selected="true">Heute</button>
+      <button class="tab" role="tab" data-view="training" aria-selected="false">Wörter &amp; Regeln</button>
+      <button class="tab" role="tab" data-view="sprechen" aria-selected="false">Hören &amp; Sprechen</button>
+      <button class="tab" role="tab" data-view="schreiben" aria-selected="false">Schreiben</button>
+      <button class="tab" role="tab" data-view="fortschritt" aria-selected="false">Fortschritt</button>
+      <button class="tab" role="tab" data-view="profil" aria-selected="false">Profil</button>
+    </nav>
+  </div>
+</header>
+
+<main class="wrap">
+  <div class="banner" id="storeBanner" hidden></div>
+
+  <!-- ONBOARDING -->
+  <div id="onb" hidden></div>
+
+  <!-- HEUTE -->
+  <div data-panel="heute">
+    <section>
+      <div class="sec-h"><h2>Heute</h2><span class="meta" id="todayDate"></span></div>
+      <div class="kpis">
+        <div class="kpi"><div class="l">Heute gelernt</div><div class="v" id="kMin">–</div></div>
+        <div class="kpi"><div class="l">Fällige Karten</div><div class="v" id="kDue">–</div></div>
+        <div class="kpi"><div class="l">Niveau (geschätzt)</div><div class="v" id="kLvl">–</div></div>
+        <div class="kpi"><div class="l">Serie</div><div class="v" id="kStreak">–</div></div>
+      </div>
+    </section>
+    <section>
+      <div class="sec-h"><h2>Tagesplan</h2><span class="meta" id="planMeta"></span></div>
+      <div class="plan" id="planList"></div>
+      <div class="tol-legend">Die Zeit zählt automatisch, solange du übst. Pausen über 5 Minuten zählen nicht.</div>
+    </section>
+    <section>
+      <div class="sec-h"><h2>Auf Kurs?</h2><span class="meta" id="goalMeta"></span></div>
+      <div id="homeVerdict"></div>
+    </section>
+    <section>
+      <div class="sec-h"><h2>Heute im Fokus</h2><span class="meta" id="focusMeta">täglich neu</span></div>
+      <div class="plan" id="focusList"></div>
+      <div class="tol-legend">Wird jeden Tag aus deinen Ergebnissen neu berechnet. Schwächen übst du auf deiner Stufe, Stärken eine halbe Stufe höher. Über 75 % richtig → die Stufe steigt, darunter → sie sinkt.</div>
+    </section>
+  </div>
+
+  <!-- TRAINING -->
+  <div data-panel="training" hidden>
+    <div class="ttsbar" data-ttsbar></div>
+    <section id="trainSetup">
+      <div class="sec-h"><h2>Karten lernen</h2><span class="meta">Wiederholungsplan</span></div>
+      <div class="row stretch">
+        <button class="btn primary" id="startDue">Fällige Karten</button>
+        <button class="btn" id="startWords">Wortschatz</button>
+        <button class="btn" id="startRules">Grammatik</button>
+        <button class="btn" id="startFocus">Größte Schwäche</button>
+      </div>
+    </section>
+    <section id="trainArea" hidden>
+      <div class="progress"><i id="trainProg" style="width:0%"></i></div>
+      <div id="cardHost"></div>
+      <div class="row" style="margin-top:10px"><button class="btn ghost sm" id="endTrain">Training beenden</button></div>
+    </section>
+    <section>
+      <div class="sec-h"><h2>Adaptive KI-Übung</h2><span class="meta">6 Aufgaben</span></div>
+      <p class="lead">Schwächen festigen: Aufgaben auf deiner aktuellen Stufe. Stärken steigern: eine halbe Stufe darüber. Jede Antwort passt die Stufe an; falsche Antworten werden zu Karten.</p>
+      <div class="row"><button class="btn primary" id="genEx">Schwächen festigen</button><button class="btn" id="genCh">Stärken steigern</button><button class="btn ghost" id="stopEx" hidden>Stopp</button></div>
+      <div id="exStatus" class="muted" style="margin-top:8px"></div>
+      <div id="exHost" style="margin-top:10px"></div>
+    </section>
+    <section>
+      <div class="sec-h"><h2>Fehler erfassen</h2><span class="meta">Neue Karte</span></div>
+      <form class="form" id="addForm">
+        <label class="f" for="fFront">Vorderseite <span class="h">Falscher Satz, Frage oder Begriff</span>
+          <input type="text" id="fFront" required placeholder="Korrigiere: Ich habe mit der Schleifscheibe gesprochen über den Verschleiß.">
+        </label>
+        <label class="f" for="fBack">Rückseite <span class="h">Richtige Lösung</span>
+          <input type="text" id="fBack" required placeholder="Ich habe über den Verschleiß der Schleifscheibe gesprochen.">
+        </label>
+        <div class="grid2">
+          <label class="f" for="fCat">Kategorie<select id="fCat"></select></label>
+          <label class="f" for="fEn">Englisch <span class="h">optional</span><input type="text" id="fEn"></label>
+        </div>
+        <label class="f" for="fNote">Erklärung <span class="h">optional</span><input type="text" id="fNote" placeholder="über + Akk."></label>
+        <div class="row"><button class="btn primary" type="submit" id="addBtn">Karte speichern</button></div>
+      </form>
+    </section>
+    <section>
+      <div class="sec-h"><h2>Zuletzt hinzugefügt</h2><span class="meta" id="recentCount"></span></div>
+      <div class="list" id="recentList"></div>
+    </section>
+  </div>
+
+  <!-- HOEREN & SPRECHEN -->
+  <div data-panel="sprechen" hidden>
+    <div class="ttsbar" data-ttsbar></div>
+    <section>
+      <div class="sec-h"><h2>Sprechaufgabe</h2><span class="meta">Sprechen · KI-Feedback</span></div>
+      <p class="lead">Lies oder hör die Aufgabe, dann sprich deine Antwort über die Spracheingabe der Tastatur. Die KI bewertet Grammatik, Wortschatz und Zusammenhang.</p>
+      <div class="help">
+        <div><b>So sprichst du:</b> Tippe ins Textfeld, dann auf das Mikrofon der Tastatur (Gboard) und sprich Deutsch.</div>
+        <div class="fa-hint" style="margin:6px 0 0">روی کادر متن بزن، بعد روی آیکون میکروفون کیبورد (Gboard) بزن و آلمانی صحبت کن. اگر آلمانی در کیبورد نیست: تنظیمات Gboard ← زبان‌ها ← آلمانی را اضافه کن.</div>
+      </div>
+      <div class="row" style="margin-top:10px"><button class="btn primary" id="genSpeak">Neue Aufgabe</button><span id="spStatus" class="muted"></span></div>
+      <div id="spHost"></div>
+    </section>
+    <section>
+      <div class="sec-h"><h2>Nachsprechen</h2><span class="meta">Sprechen · Aussprache</span></div>
+      <p class="lead">Hör den Satz, sprich ihn per Spracheingabe nach. Was die Spracherkennung nicht versteht, ist rot markiert – meist ein Hinweis auf die Aussprache.</p>
+      <div class="row"><button class="btn primary" id="startShadow">5 Sätze starten</button></div>
+      <div id="shHost"></div>
+    </section>
+    <section>
+      <div class="sec-h"><h2>Hördiktat</h2><span class="meta">Hören</span></div>
+      <p class="lead">Hör einen Satz aus deinen Karten und schreib, was du hörst.</p>
+      <div class="row"><button class="btn primary" id="startDict">5 Sätze starten</button></div>
+      <div id="dcHost"></div>
+    </section>
+    <section>
+      <div class="sec-h"><h2>Hörverstehen</h2><span class="meta">Hören · KI-Text</span></div>
+      <p class="lead">Ein kurzer Text aus deinem Fachgebiet wird vorgelesen. Beantworte die Fragen, ohne den Text zu lesen.</p>
+      <div class="row"><button class="btn primary" id="genListen">Neuer Hörtext</button><span id="lsStatus" class="muted"></span></div>
+      <div id="lsHost"></div>
+    </section>
+  </div>
+
+  <!-- SCHREIBEN -->
+  <div data-panel="schreiben" hidden>
+    <div class="ttsbar" data-ttsbar></div>
+    <section>
+      <div class="sec-h"><h2>Schreibaufgabe</h2><span class="meta">Schreiben · KI-Bewertung</span></div>
+      <p class="lead">Eine Aufgabe aus deinem Berufsalltag: E-Mail, Bericht, Anschreiben. Du bekommst eine Niveau-Einschätzung, die Korrektur und deine Fehler als Karten.</p>
+      <div class="row"><button class="btn primary" id="genWrite">Neue Aufgabe</button><span id="wrStatus" class="muted"></span></div>
+      <div id="wrTask"></div>
+    </section>
+    <section>
+      <div class="sec-h"><h2>Text prüfen</h2><span class="meta">eigener Text</span></div>
+      <div class="form">
+        <label class="f" for="checkText">Dein Text <span class="h">E-Mail, Bericht, Antwort auf eine Aufgabe</span>
+          <textarea id="checkText" placeholder="Sehr geehrte Frau Weber, …"></textarea>
+        </label>
+        <div class="row"><button class="btn primary" id="checkBtn">Prüfen</button><button class="btn ghost" id="checkStop" hidden>Stopp</button><span class="muted" id="wcount"></span></div>
+      </div>
+      <div id="checkStatus" class="muted" style="margin-top:8px"></div>
+      <div id="checkResult"></div>
+    </section>
+  </div>
+
+  <!-- FORTSCHRITT -->
+  <div data-panel="fortschritt" hidden>
+    <section>
+      <div class="sec-h"><h2>Weg zum Ziel</h2><span class="meta">GER-Skala</span></div>
+      <div class="scale" id="scale"></div>
+      <div id="progVerdict" style="margin-top:10px"></div>
+    </section>
+    <section>
+      <div class="sec-h"><h2>Lernzeit 14 Tage</h2><span class="meta">Minuten je Fertigkeit</span></div>
+      <div class="chart" id="minChart"></div>
+    </section>
+    <section>
+      <div class="sec-h"><h2>Fertigkeiten</h2><span class="meta">Sicherheit · Stufe · 7 Tage</span></div>
+      <div class="tol" id="skillBars"></div>
+      <div class="tol-legend">Balken = Sicherheit aus deinen letzten Ergebnissen. Stufe = Schwierigkeit, auf der du gerade trainierst. ↑ ↓ → = Veränderung der Stufe in 7 Tagen.</div>
+    </section>
+    <section>
+      <div class="sec-h"><h2>Grammatik &amp; Wortschatz</h2><span class="meta">nach Kategorie</span></div>
+      <div class="tol" id="allCats"></div>
+      <div class="tol-legend">Schwächste zuerst. Tippe auf eine Kategorie für die schwierigsten Karten.</div>
+    </section>
+  </div>
+
+  <!-- PROFIL -->
+  <div data-panel="profil" hidden>
+    <section>
+      <div class="sec-h"><h2>Profil &amp; Ziel</h2><span class="meta">Plan anpassen</span></div>
+      <div id="profForm"></div>
+    </section>
+    <section id="saSettings" hidden>
+      <div class="sec-h"><h2>KI-Schlüssel &amp; Sicherung</h2><span class="meta">nur auf diesem Gerät</span></div>
+      <div id="saHost"></div>
+    </section>
+    <section>
+      <div class="sec-h"><h2>Einstufung</h2><span class="meta" id="examMeta"></span></div>
+      <div id="examHist"></div>
+      <div class="row" style="margin-top:10px"><button class="btn" id="retest">Einstufungstest wiederholen</button></div>
+    </section>
+  </div>
+</main>
+
+<script>
+(function(){
+"use strict";
+/* ================= Constants ================= */
+const CATS = {
+  artikel:["Artikel & Genus","w"], kasus:["Kasus & Endungen","g"], wortstellung:["Wortstellung","g"],
+  praeposition:["Präpositionen","g"], verben:["Verben & Zeiten","g"], passiv:["Passiv & Nominalstil","g"],
+  fachwort:["Fachwortschatz","w"], redemittel:["Redemittel & Ausdruck","s"], rechtschreibung:["Rechtschreibung","sc"], aussprache:["Aussprache","s"]
+};
+const CAT_KEYS = Object.keys(CATS);
+const SKILLS = { w:"Wortschatz", g:"Grammatik", h:"Hören", s:"Sprechen", sc:"Schreiben" };
+const SK_KEYS = ["w","g","h","s","sc"];
+const SK_COLOR = { w:"var(--s-w)", g:"var(--s-g)", h:"var(--s-h)", s:"var(--s-s)", sc:"var(--s-sc)" };
+const LEVELS = ["A1","A2","B1","B2","C1","C2"];
+const LEVEL_V = { A1:1, A2:2, B1:3, B2:4, C1:5, C2:6 };
+/* Cumulative study hours to reach each level (index = level value). Midpoints from Goethe-Institut / Cambridge
+   guided-learning-hour guidance, raised for mixed self-study. Range shown as ×0.75 … ×1.3. */
+const CUM = [0, 120, 250, 450, 700, 1000, 1400];
+const DAY = 86400000, TOL = 0.20;
+const TOPICS = ["Fertigungstechnik","Schleifen & Zerspanung","Simulation (FEA)","Werkstoffe","Qualitätssicherung & Messtechnik","Konstruktion","Produktion & Lean","Automatisierung","Forschung & Entwicklung","Projektmanagement","Kunden & Vertrieb","Bewerbung & Interview","Alltag & Familie","Behörden & Verträge"];
+const GOALS = ["Job im Maschinenbau","Beruf allgemein","Studium & Forschung","Prüfung (telc / Goethe)","Alltag & Integration"];
+const EXAM = [
+  {l:"A2",k:"g",q:"Ich wohne ___ Tuttlingen.",o:["in","an","auf","nach"]},
+  {l:"A2",k:"g",q:"Gestern ___ ich lange gearbeitet.",o:["habe","bin","hatte","war"]},
+  {l:"A2",k:"g",q:"Kannst du mir bitte ___ Werkzeug geben?",o:["das","den","dem","der"]},
+  {l:"A2",k:"g",q:"Wir fahren morgen ___ Stuttgart.",o:["nach","zu","in","bei"]},
+  {l:"A2",k:"w",q:"Die Maschine ist kaputt. Wir müssen sie ___.",o:["reparieren","bezahlen","besuchen","bestellen"]},
+  {l:"A2",k:"g",q:"Ich komme heute nicht ins Büro, ___ ich krank bin.",o:["weil","denn","deshalb","trotzdem"]},
+  {l:"B1",k:"g",q:"Ich interessiere mich ___ die Stelle als Ingenieur.",o:["für","an","auf","über"]},
+  {l:"B1",k:"g",q:"Wenn ich mehr Zeit ___, würde ich einen Kurs besuchen.",o:["hätte","habe","hatte","haben"]},
+  {l:"B1",k:"g",q:"Das ist der Kollege, ___ ich gestern gesprochen habe.",o:["mit dem","mit den","mit der","mit denen"]},
+  {l:"B1",k:"g",q:"Die Anlage ___ jeden Morgen kontrolliert.",o:["wird","ist","hat","würde"]},
+  {l:"B1",k:"w",q:"Wir müssen die Lieferung ___, weil das Material fehlt.",o:["verschieben","verschwinden","verschreiben","versichern"]},
+  {l:"B1",k:"g",q:"Er hat vergessen, die Messdaten ___ speichern.",o:["zu","um","für","(nichts)"]},
+  {l:"B2",k:"g",q:"___ der hohen Temperatur musste der Versuch abgebrochen werden.",o:["Wegen","Trotz","Obwohl","Weil"]},
+  {l:"B2",k:"g",q:"Der Bericht muss bis Freitag ___ werden.",o:["fertiggestellt","fertigstellen","fertigzustellen","fertiggestellt worden"]},
+  {l:"B2",k:"g",q:"„Nachdem die Scheibe abgerichtet worden war, …“ im Nominalstil:",o:["Nach dem Abrichten der Scheibe …","Nach dem Abrichten die Scheibe …","Nach das Abrichten der Scheibe …","Nachdem Abrichten der Scheibe …"]},
+  {l:"B2",k:"g",q:"Er tut so, als ___ er alles verstanden.",o:["hätte","hat","hatte","würde"]},
+  {l:"B2",k:"g",q:"Je höher die Zustellung, ___ größer die Schleifkraft.",o:["desto","als","so","wie"]},
+  {l:"B2",k:"w",q:"„Die Ergebnisse sind aussagekräftig.“ bedeutet:",o:["Sie lassen klare Schlüsse zu.","Sie sind sehr umfangreich.","Sie wurden laut vorgetragen.","Sie sind noch vorläufig."]},
+  {l:"C1",k:"g",q:"Die Anlage ist ___ ausgelegt, dass sie im Dreischichtbetrieb laufen kann.",o:["so","als","wie","damit"]},
+  {l:"C1",k:"g",q:"Ungeachtet ___ Einwände wurde das Projekt genehmigt.",o:["der","die","den","dem"]},
+  {l:"C1",k:"g",q:"„Die Messung ist zu wiederholen.“ bedeutet:",o:["Die Messung muss wiederholt werden.","Die Messung kann nicht wiederholt werden.","Die Messung wurde schon wiederholt.","Die Messung wird zu oft wiederholt."]},
+  {l:"C1",k:"g",q:"Der ___ Prüfbericht liegt Ihnen vor.",o:["von uns erstellte","von uns erstellten","uns erstellte","von uns erstellende"]},
+  {l:"C1",k:"w",q:"Wir müssen das Problem an der ___ packen.",o:["Wurzel","Spitze","Quelle","Basis"]},
+  {l:"C1",k:"g",q:"Laut Hersteller ___ die Maschine wartungsfrei.",o:["sei","seien","wären","sein"]}
+]; // first option is always correct; display order is shuffled
+
+/* ================= Helpers ================= */
+const $ = id => document.getElementById(id);
+function h(tag, attrs, ...kids){
+  const el = document.createElement(tag);
+  if (attrs) for (const [k,v] of Object.entries(attrs)){
+    if (v == null || v === false) continue;
+    if (k === "class") el.className = v;
+    else if (k.startsWith("on")) el.addEventListener(k.slice(2), v);
+    else el.setAttribute(k, v === true ? "" : v);
+  }
+  for (const k of kids.flat()){ if (k == null || k === false) continue; el.append(k.nodeType ? k : String(k)); }
+  return el;
+}
+function fa(text, tag){ return h(tag || "div", {class:"fa", dir:"rtl", lang:"fa"}, text); }
+function dayKey(t){ const d = new Date(t ?? Date.now()); return d.getFullYear()+"-"+String(d.getMonth()+1).padStart(2,"0")+"-"+String(d.getDate()).padStart(2,"0"); }
+function startOfDay(t){ const d = new Date(t ?? Date.now()); d.setHours(0,0,0,0); return d.getTime(); }
+function fmtDate(t){ return new Date(t).toLocaleDateString("de-DE",{day:"2-digit",month:"2-digit",year:"numeric"}); }
+function toast(msg){ const t = h("div",{class:"toast",role:"status"},msg); document.body.append(t); setTimeout(()=>t.remove(), 2800); }
+function catName(k){ return (CATS[k]||CATS.fachwort)[0]; }
+function catSkill(k){ return (CATS[normCat(k)]||CATS.fachwort)[1]; }
+function normCat(k){ k = String(k||"").toLowerCase().trim(); return CATS[k] ? k : "fachwort"; }
+function str(v, n){ return v == null ? "" : String(v).slice(0, n || 1200); }
+function num(v, d){ const n = parseFloat(v); return isFinite(n) ? n : d; }
+function norm(s){ return String(s||"").toLowerCase().replace(/[„“"'.,!?;:…()\-–]/g," ").replace(/\s+/g," ").trim(); }
+function shuffle(a){ a = a.slice(); for (let i=a.length-1;i>0;i--){ const j = Math.floor(Math.random()*(i+1)); [a[i],a[j]] = [a[j],a[i]]; } return a; }
+function words(s){ return norm(s).split(" ").filter(Boolean); }
+
+/* ================= State ================= */
+const state = { uid: null, db: null, sample: null, profile: null, profileLoaded: false, items: [], days: {}, session: null, open: new Set(), openCat: null, view: "heute", adapt: null, adaptLoaded: false, draft: null, draftLoaded: false };
+
+/* ================= Level & plan math ================= */
+function hoursAt(v){ v = Math.max(0, Math.min(6, v)); const i = Math.floor(v); if (i >= 6) return CUM[6]; return CUM[i] + (CUM[i+1]-CUM[i]) * (v - i); }
+function vAtHours(hrs){ for (let i=0;i<6;i++){ if (hrs < CUM[i+1]) return i + (hrs - CUM[i]) / (CUM[i+1]-CUM[i]); } return 6; }
+function lvlLabel(v){
+  if (v == null || !isFinite(v)) return "–";
+  if (v < 1) return "A1.1";
+  const i = Math.min(6, Math.floor(v)); const base = LEVELS[i-1];
+  if (i >= 6) return "C2";
+  return base + ((v - i) < 0.5 ? ".1" : ".2");
+}
+function fmtV(v){ return (Math.round(v*10)/10).toFixed(1).replace(".",","); }
+function lvlFine(v){ return lvlLabel(v) + " (" + fmtV(v) + ")"; }
+function minutesSince(t0){
+  let m = 0; const k0 = dayKey(t0);
+  for (const [k,d] of Object.entries(state.days)) if (k >= k0 && d && d.m) for (const s of SK_KEYS) m += d.m[s] || 0;
+  return m;
+}
+function immersionPerDay(p){ return Math.max(0, num(p.arbeitStd, 0)) * 60 / 7 * 0.2; } // 20 % of German used at work counts as study
+function currentV(p){
+  if (!p) return null;
+  if (!p.exam){ return LEVEL_V[p.selbst] ? LEVEL_V[p.selbst] + 0.25 : null; }
+  const t0 = p.exam.date || Date.now();
+  const days = Math.max(0, (Date.now() - t0) / DAY);
+  const hrs = hoursAt(p.exam.v) + minutesSince(t0)/60 + immersionPerDay(p)*days/60;
+  return vAtHours(hrs);
+}
+function paceMinutes(){ // average logged minutes per day over the last 14 days (days with data from first activity)
+  let total = 0, n = 0, started = false;
+  for (let i=13;i>=0;i--){ const d = state.days[dayKey(Date.now()-i*DAY)]; const m = d && d.m ? SK_KEYS.reduce((a,s)=>a+(d.m[s]||0),0) : 0; if (m > 0) started = true; if (started){ total += m; n++; } }
+  return n >= 3 ? total / n : null;
+}
+function computePlan(p, vNow){
+  const v0 = vNow != null ? vNow : currentV(p);
+  const goalV = LEVEL_V[p.zielNiveau] || 4;
+  const needH = Math.max(0, hoursAt(goalV) - hoursAt(v0));
+  const target = p.zielDatum ? new Date(p.zielDatum + "T12:00:00").getTime() : Date.now() + 365*DAY;
+  const days = Math.max(1, Math.round((target - startOfDay()) / DAY));
+  const imm = immersionPerDay(p);
+  const req = Math.max(0, needH*60/days - imm);
+  const reqLo = Math.max(0, needH*0.75*60/days - imm), reqHi = Math.max(0, needH*1.3*60/days - imm);
+  const planned = Math.max(0, num(p.minuten, 30));
+  const eff = planned + imm;
+  const daysAtPlan = eff > 0 ? needH*60/eff : Infinity;
+  const eta = Date.now() + daysAtPlan*DAY, etaLo = Date.now() + daysAtPlan*0.75*DAY, etaHi = Date.now() + daysAtPlan*1.3*DAY;
+  const reqR = Math.ceil(req/5)*5;
+  let status = "ok";
+  if (needH <= 0) status = "erreicht";
+  else if (req > 240) status = "nein";
+  else if (planned + 0.5 < req) status = planned*1.3 >= req ? "knapp" : "nein";
+  // earliest realistic date at 90 min/day
+  const date90 = Date.now() + needH*60/(90+imm)*DAY;
+  return { v0, goalV, needH, needLo: needH*0.75, needHi: needH*1.3, days, target, req: reqR, reqLo: Math.ceil(reqLo/5)*5, reqHi: Math.ceil(reqHi/5)*5, planned, imm, eta, etaLo, etaHi, status, date90 };
+}
+function allocation(p){
+  const base = { w:.24, g:.2, h:.16, s:.22, sc:.18 };
+  const sk = skillStrengths(p);
+  for (const s of SK_KEYS){ const strength = sk[s] == null ? 0.5 : sk[s]; base[s] *= (1.6 - strength); }
+  const sum = SK_KEYS.reduce((a,s)=>a+base[s],0);
+  const total = Math.max(15, num(p && p.minuten, 30));
+  const out = {}; let used = 0;
+  for (const s of SK_KEYS){ out[s] = Math.max(5, Math.round(total*base[s]/sum/5)*5); used += out[s]; }
+  // nudge to total
+  const order = SK_KEYS.slice().sort((a,b)=>base[b]-base[a]);
+  let i = 0; while (used < total && i < 20){ out[order[i%5]] += 5; used += 5; i++; }
+  i = 0; while (used > total && i < 20){ const s = order[4 - (i%5)]; if (out[s] > 5){ out[s] -= 5; used -= 5; } i++; }
+  return out;
+}
+
+/* ================= Text-to-speech ================= */
+const SPK_SVG = '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M11 5 6 9H3v6h3l5 4z" fill="currentColor" stroke="currentColor"/><path d="M15.5 8.5a5 5 0 0 1 0 7"/><path d="M18.5 5.5a9 9 0 0 1 0 13"/></svg>';
+const TTS = { ok: typeof window.speechSynthesis !== "undefined" && typeof window.SpeechSynthesisUtterance !== "undefined", voices: [], rate: 0.95, auto: false, current: null, keep: [], badVoices: new Set() };
+try { const r = parseFloat(localStorage.getItem("fd.rate")); if (r) TTS.rate = r; TTS.auto = localStorage.getItem("fd.auto") === "1"; } catch(e){}
+function loadVoices(){ try { TTS.voices = window.speechSynthesis.getVoices() || []; } catch(e){ TTS.voices = []; } renderTtsBars(); }
+function langOf(v){ return String(v.lang||"").replace("_","-").toLowerCase(); }
+function pickVoice(lang){
+  const want = lang.toLowerCase(), pre = want.slice(0,2);
+  const vs = TTS.voices.filter(v => langOf(v).startsWith(pre) && !TTS.badVoices.has(v.name));
+  if (!vs.length) return null;
+  const score = v => { const n = String(v.name||"").toLowerCase(); let s = 0;
+    if (langOf(v) === want) s += 4; if (v.localService !== false) s += 3;
+    if (/premium|enhanced|neural/.test(n)) s += 2; if (/anna|helena|petra|markus|yannick|katja|hedda|conrad|serena|daniel|kate/.test(n)) s += 1; return s; };
+  return vs.slice().sort((a,b)=>score(b)-score(a))[0];
+}
+function speechText(t){ return String(t||"").replace(/_{2,}/g," … ").replace(/[„“"»«]/g,"").replace(/\s\+\s/g," plus ").replace(/→/g,", ").replace(/(\S)\/(\S)/g,"$1, $2").replace(/\s+/g," ").trim(); }
+function speak(text, lang, btn, report, retry){
+  if (!TTS.ok){ report ? report("error:no-api") : toast("Vorlesen geht hier nicht. Öffne die App in Chrome."); return; }
+  const s = speechText(text); if (!s) return;
+  const synth = window.speechSynthesis;
+  try {
+    if (!retry && btn && TTS.current && TTS.current.btn === btn && (synth.speaking || synth.pending)){ synth.cancel(); return; }
+    if (synth.speaking || synth.pending) synth.cancel();
+    try { synth.resume(); } catch(e){}
+    if (!TTS.voices.length) loadVoices();
+    document.querySelectorAll(".spk.on").forEach(b=>b.classList.remove("on"));
+    const cur = { btn, started: false }; TTS.current = cur;
+    const isEn = String(lang||"").startsWith("en");
+    const voice = pickVoice(lang || "de-DE");
+    const parts = s.match(/[^.!?]+[.!?…]*\s*/g) || [s];
+    const finish = () => { if (btn) btn.classList.remove("on"); if (TTS.current === cur) TTS.current = null; };
+    if (btn) btn.classList.add("on");
+    TTS.keep = [];
+    parts.forEach((p, i) => {
+      const u = new SpeechSynthesisUtterance(p.trim());
+      u.lang = lang || "de-DE"; if (voice) u.voice = voice;
+      u.rate = isEn ? 1 : TTS.rate; u.volume = 1;
+      if (i === 0) u.onstart = () => { cur.started = true; report && report("start"); };
+      if (i === parts.length - 1) u.onend = () => { finish(); report && report("end"); };
+      u.onerror = ev => {
+        const code = (ev && ev.error) || "unbekannt";
+        if (code === "interrupted" || code === "canceled"){ finish(); return; }
+        if (!retry && voice){ TTS.badVoices.add(voice.name); synth.cancel(); speak(text, lang, btn, report, true); return; }
+        finish(); report ? report("error:" + code) : toast("Vorlesen fehlgeschlagen (" + code + ").");
+      };
+      TTS.keep.push(u); synth.speak(u);
+    });
+    setTimeout(() => {
+      if (TTS.current !== cur || cur.started) return;
+      if (!retry && voice){ TTS.badVoices.add(voice.name); synth.cancel(); speak(text, lang, btn, report, true); return; }
+      finish(); synth.cancel(); report ? report("nostart") : toast("Kein Ton. Öffne die App in Chrome und tippe auf „Stimme testen“.");
+    }, 2500);
+  } catch(e){ if (btn) btn.classList.remove("on"); report && report("error:" + (e && e.message || "exception")); }
+}
+function spk(text, lang, label){
+  if (!text) return null;
+  const en = String(lang||"").startsWith("en");
+  const lbl = label || (en ? "Englisch vorlesen" : "Vorlesen");
+  const b = h("button",{class:"spk",type:"button","aria-label":lbl,title:lbl});
+  b.innerHTML = SPK_SVG + (en ? "<span>EN</span>" : "");
+  b.addEventListener("click", ev => { ev.preventDefault(); ev.stopPropagation(); speak(text, lang || "de-DE", b); });
+  return b;
+}
+function say(text, cls, audio){ return h("div",{class:"say"}, h("div",{class:"t"+(cls?" "+cls:"")}, text), spk(audio || text, "de-DE")); }
+function enLine(text){ return text ? h("div",{class:"en-line"}, h("div",{class:"t"}, h("b",null,"EN"), text), spk(text, "en-GB")) : null; }
+function renderTtsBars(){
+  document.querySelectorAll("[data-ttsbar]").forEach(bar => {
+    if (!bar.dataset.built){
+      bar.dataset.built = "1";
+      const auto = h("input",{type:"checkbox"}); auto.checked = TTS.auto;
+      auto.addEventListener("change", ()=>{ TTS.auto = auto.checked; try { localStorage.setItem("fd.auto", TTS.auto?"1":"0"); } catch(e){} renderTtsBars(); });
+      const slow = h("button",{type:"button","data-rate":"0.7"},"Langsam"), normal = h("button",{type:"button","data-rate":"0.95"},"Normal");
+      [slow, normal].forEach(b => b.addEventListener("click", ()=>{ TTS.rate = parseFloat(b.dataset.rate); try { localStorage.setItem("fd.rate", String(TTS.rate)); } catch(e){} renderTtsBars(); }));
+      const test = h("button",{class:"btn sm ghost",type:"button"},"Stimme testen");
+      const hint = h("span",{class:"muted","data-hint":""});
+      const diag = h("div",{"data-diag":"",hidden:true,style:"flex-basis:100%;font-family:var(--f-mono);font-size:12px;line-height:1.6;border-top:1px solid var(--line);padding-top:8px"});
+      test.addEventListener("click", ()=>voiceTest(diag, test));
+      bar.append(h("label",null, auto, " Automatisch vorlesen"), h("div",{class:"seg",role:"group","aria-label":"Sprechtempo"}, slow, normal), test, hint, diag);
+      bar._auto = auto; bar._slow = slow; bar._normal = normal; bar._hint = hint;
+    }
+    bar._auto.checked = TTS.auto;
+    bar._slow.setAttribute("aria-pressed", TTS.rate < 0.85 ? "true" : "false");
+    bar._normal.setAttribute("aria-pressed", TTS.rate >= 0.85 ? "true" : "false");
+    const v = TTS.ok ? pickVoice("de-DE") : null;
+    bar._hint.textContent = !TTS.ok ? "Vorlesen ist in dieser Ansicht nicht verfügbar → in Chrome öffnen." : (TTS.voices.length && !v ? "Keine deutsche Stimme installiert." : (v ? "Stimme: " + v.name : ""));
+  });
+}
+function voiceTest(out, btn){
+  out.hidden = false; const lines = [];
+  const show = () => out.replaceChildren(...lines.map(l => h("div",null,l)));
+  if (!TTS.ok){ lines.push("1. Sprachausgabe: in dieser Ansicht NICHT vorhanden."); lines.push("→ Öffne den Link in Chrome (Android) oder Safari (iPhone)."); out.append(); show(); out.append(fa("صدا در این نما پشتیبانی نمی‌شود. لینک را در Chrome باز کن.")); return; }
+  loadVoices();
+  const de = TTS.voices.filter(v => langOf(v).startsWith("de")); const v = pickVoice("de-DE");
+  lines.push("1. Sprachausgabe: vorhanden");
+  lines.push("2. Stimmen: " + TTS.voices.length + " gesamt, " + de.length + " deutsch" + (v ? " (" + v.name + ")" : ""));
+  lines.push("3. Test läuft …"); show();
+  speak("Die Schleifscheibe wird nach jedem Versuch abgerichtet.", "de-DE", btn, st => {
+    if (st === "start") lines[2] = "3. Wiedergabe gestartet. Hörst du nichts → Medienlautstärke prüfen.";
+    else if (st === "end"){ if (!/gestartet/.test(lines[2])) lines[2] = "3. Wiedergabe beendet."; lines.push("4. Fertig."); }
+    else if (st === "nostart") lines[2] = "3. Kein Start nach 2,5 s → diese Ansicht blockiert die Sprachausgabe. In Chrome öffnen.";
+    else lines[2] = "3. Fehler: " + st.slice(6) + (de.length ? "" : " · keine deutsche Stimme installiert");
+    show();
+  });
+}
+if (TTS.ok){ loadVoices(); try { window.speechSynthesis.addEventListener("voiceschanged", loadVoices); } catch(e){ window.speechSynthesis.onvoiceschanged = loadVoices; } }
+
+/* ================= Storage ================= */
+/* Every write goes through dbw(): the header shows "Speichert …" while writes are pending,
+   "Gespeichert ✓ hh:mm" once the server confirmed them, and a red warning if a write failed. */
+const SV = { pending: 0, last: 0, failed: false };
+function renderSave(){
+  const el = $("saveState"); if (!el) return;
+  if (!state.db){ el.className = "proto bad"; el.textContent = state.uid === null && window.claude ? "" : "Nur auf diesem Gerät"; return; }
+  if (SV.failed){ el.className = "proto bad"; el.textContent = "Nicht gespeichert – Verbindung prüfen"; return; }
+  if (SV.pending > 0){ el.className = "proto busy"; el.textContent = "Speichert …"; return; }
+  if (SV.last){ el.className = "proto ok"; el.textContent = (window.FD_STANDALONE ? "Auf dem Gerät gespeichert ✓ " : "Gespeichert ✓ ") + new Date(SV.last).toLocaleTimeString("de-DE",{hour:"2-digit",minute:"2-digit"}); }
+}
+function dbw(promise){
+  SV.pending++; renderSave();
+  return Promise.resolve(promise).then(r => { SV.pending--; SV.failed = false; SV.last = Date.now(); renderSave(); return r; },
+    e => { SV.pending--; SV.failed = true; renderSave(); throw e; });
+}
+window.addEventListener("beforeunload", () => { if (statsTimer || AD.timer || DR.timer) flushAll(); });
+function base(){ return "data/users/" + state.uid; }
+function itemsPath(){ return base() + "/app/items"; }
+async function saveProfile(p){
+  state.profile = p;
+  if (state.db) await dbw(state.db.doc(base() + "/profile").set(p));
+  else { try { localStorage.setItem("fd.profile", JSON.stringify(p)); } catch(e){} }
+}
+async function addItem(data){
+  const now = Date.now(); const kind = data.kind || "fehler";
+  const it = { front:str(data.front,600), back:str(data.back,1500), note:str(data.note,400), en:str(data.en,1500), satz:str(data.satz,600),
+    category: normCat(data.category), kind, source: data.source || "manuell", created: now, due: now,
+    interval: 0, ease: 2.5, reps: 0, lapses: kind==="fehler"?1:0, seen: kind==="fehler"?1:0, wrong: kind==="fehler"?1:0, last: 0 };
+  if (data.detail && typeof data.detail === "object") it.detail = data.detail;
+  if (state.db) await dbw(state.db.collection(itemsPath()).add(it));
+  else { state.items.push({ id: "l"+now+Math.random().toString(36).slice(2,6), ...it }); renderLists(); }
+}
+async function updateItem(id, patch){
+  if (state.db) await dbw(state.db.doc(itemsPath() + "/" + id).update(patch));
+  else { const it = state.items.find(x=>x.id===id); if (it) Object.assign(it, patch); renderLists(); }
+}
+async function deleteItem(id){
+  if (state.db) await dbw(state.db.doc(itemsPath() + "/" + id).delete());
+  else { state.items = state.items.filter(x=>x.id!==id); renderLists(); }
+}
+let statsTimer = null, statsWriting = Promise.resolve();
+function saveStatsSoon(){
+  if (statsTimer) return;
+  statsTimer = setTimeout(() => {
+    statsTimer = null;
+    const days = { ...state.days }; const keys = Object.keys(days).sort(); while (keys.length > 180) delete days[keys.shift()];
+    if (state.db) statsWriting = statsWriting.then(()=>dbw(state.db.doc(base() + "/stats").set({ days }))).catch(()=>{});
+  }, 4000);
+}
+function todayRec(){ const k = dayKey(); const d = state.days[k] ? { ...state.days[k] } : { r:0, c:0 }; d.m = { ...(d.m || {}) }; state.days[k] = d; return d; }
+function logReview(correct){ const d = todayRec(); d.r = (d.r||0) + 1; if (correct) d.c = (d.c||0) + 1; saveStatsSoon(); renderHome(); }
+/* Time tracking: each interaction credits the time since the previous one (max 2 min; gaps over 5 min count 0.5 min) to a skill. */
+const trk = { last: 0 };
+function track(skill){
+  const now = Date.now(); const gap = now - trk.last;
+  const add = trk.last && gap < 300000 ? Math.min(gap, 120000) / 60000 : 0.5;
+  trk.last = now;
+  const d = todayRec(); d.m[skill] = Math.round(((d.m[skill] || 0) + add) * 100) / 100;
+  saveStatsSoon(); renderPlanSoon();
+}
+let planTimer = null; function renderPlanSoon(){ if (planTimer) return; planTimer = setTimeout(()=>{ planTimer = null; renderHome(); }, 1500); }
+function flushStats(){ if (statsTimer){ clearTimeout(statsTimer); statsTimer = null; if (state.db) statsWriting = statsWriting.then(()=>dbw(state.db.doc(base() + "/stats").set({ days: state.days }))).catch(()=>{}); } }
+function flushAll(){ flushStats(); if (AD.timer) saveAdaptNow(); if (DR.timer) saveDraftNow(); }
+document.addEventListener("visibilitychange", () => { if (document.hidden) flushAll(); });
+window.addEventListener("pagehide", flushAll);
+
+/* ================= Adaptive engine =================
+   Each grammar/vocabulary category and each skill has
+   m = confidence (moving average of recent results, 0–1) and
+   d = difficulty level on the CEFR scale (3 = B1 reached, 4 = B2 …).
+   Staircase rule: tasks near the current level move d by 0.25·(score − 0.75),
+   so >75 % correct makes the work harder and <75 % makes it easier.
+   Weak categories are trained at d, strong ones at d + 0.5. Focus is chosen once per day. */
+const AD = { timer: null, w: Promise.resolve() };
+function round3(x){ return Math.round(x*1000)/1000; }
+function clampD(v){ return Math.max(1.5, Math.min(6, Math.round(v*100)/100)); }
+function baseLevel(){ const p = state.profile; const v = p ? currentV(p) : null; return v || 3; }
+function adapt(){ if (!state.adapt) state.adapt = { cats:{}, skills:{}, hist:{}, today:null, v:1 }; const a = state.adapt; a.cats = a.cats || {}; a.skills = a.skills || {}; a.hist = a.hist || {}; return a; }
+function node(kind, key){
+  const a = adapt(); const bag = kind === "skill" ? a.skills : a.cats;
+  if (!bag[key]){
+    let m = 0.6, d = baseLevel();
+    if (kind === "cat"){ const c = catStats().find(x => x.key === key); if (c && c.seen) m = 1 - c.rate; }
+    else { const e = state.profile && state.profile.exam; if (e && e.skills && e.skills[key] != null) m = e.skills[key]; if (e){ d = key === "s" ? (e.sV || e.v) : key === "sc" ? (e.wV || e.v) : (key === "w" || key === "g") ? e.mcV || e.v : e.v; } }
+    bag[key] = { m: round3(m), d: clampD(d), n: 0, t: 0 };
+  }
+  return bag[key];
+}
+function record(kind, key, score, o){
+  if (!key) return; o = o || {};
+  const nd = node(kind, key); const w = o.w == null ? 1 : o.w;
+  score = Math.max(0, Math.min(1, score));
+  nd.m = round3(Math.max(0, Math.min(1, nd.m + 0.15*w*(score - nd.m))));
+  if (o.setD != null && isFinite(o.setD)) nd.d = clampD(nd.d + 0.35*(o.setD - nd.d) + (o.setD >= nd.d ? 0.08 : 0));
+  else if (o.moveD !== false && o.d != null && Math.abs(o.d - nd.d) <= 0.9){
+    nd.d = clampD(nd.d + 0.25*w*(score - 0.75) + (score >= 0.75 && o.d > nd.d ? 0.1*(o.d - nd.d) : 0));
+  }
+  nd.n = (nd.n || 0) + 1; nd.t = Date.now();
+  saveAdaptSoon();
+}
+function snapshotHist(a){
+  const snap = { c:{}, s:{} };
+  for (const [k,v] of Object.entries(a.cats)) snap.c[k] = [v.m, v.d];
+  for (const [k,v] of Object.entries(a.skills)) snap.s[k] = [v.m, v.d];
+  a.hist[dayKey()] = snap;
+  const keys = Object.keys(a.hist).sort(); while (keys.length > 120) delete a.hist[keys.shift()];
+}
+function saveAdaptSoon(){ if (AD.timer) return; AD.timer = setTimeout(saveAdaptNow, 3000); }
+function saveAdaptNow(){
+  if (AD.timer){ clearTimeout(AD.timer); AD.timer = null; }
+  const a = adapt(); snapshotHist(a);
+  const body = JSON.parse(JSON.stringify(a));
+  if (state.db) AD.w = AD.w.then(() => dbw(state.db.doc(base() + "/adapt").set(body))).catch(()=>{});
+  else { try { localStorage.setItem("fd.adapt", JSON.stringify(body)); } catch(e){} }
+}
+function trend(kind, key){
+  const a = adapt(); const nd = node(kind, key); const keys = Object.keys(a.hist).sort().filter(k => k < dayKey());
+  if (!keys.length) return null;
+  const limit = dayKey(Date.now() - 7*DAY); let ref = keys[0];
+  for (const k of keys) if (k <= limit) ref = k;
+  const e = a.hist[ref] && a.hist[ref][kind === "skill" ? "s" : "c"] && a.hist[ref][kind === "skill" ? "s" : "c"][key];
+  return e ? Math.round((nd.d - e[1])*100)/100 : null;
+}
+function activeCats(){ const a = adapt(); return CAT_KEYS.filter(c => state.items.some(it => normCat(it.category) === c) || (a.cats[c] && a.cats[c].n > 0)); }
+function todayFocus(){
+  const a = adapt(); const k = dayKey();
+  const cand = activeCats().map(c => ({ c, m: node("cat", c).m })).sort((x,y) => x.m - y.m);
+  if (a.today && a.today.date === k && Array.isArray(a.today.weak)){
+    const t = a.today;
+    const full = t.weak.length >= Math.min(2, cand.length);
+    const strongOk = t.strong || !cand.some(x => !t.weak.includes(x.c) && x.m >= 0.7);
+    if (full && strongOk) return t; // stable for the day once it is complete
+  }
+  const weak = cand.slice(0, 2).map(x => x.c);
+  const rest = cand.filter(x => !weak.includes(x.c)).sort((x,y) => y.m - x.m);
+  const strong = rest.length && rest[0].m >= 0.7 ? rest[0].c : null;
+  a.today = { date: k, weak, strong };
+  if (cand.length) saveAdaptSoon();
+  return a.today;
+}
+function strongCats(n){ const f = todayFocus(); return activeCats().filter(c => !f.weak.includes(c)).map(c => ({ c, m: node("cat", c).m })).filter(x => x.m >= 0.65).sort((x,y) => y.m - x.m).slice(0, n).map(x => x.c); }
+function taskLevel(skill){ const nd = node("skill", skill); return clampD(nd.d + (nd.m >= 0.75 ? 0.5 : nd.m < 0.5 ? 0 : 0.25)); }
+function skillStrengths(p){
+  const out = {}; const e = p && p.exam && p.exam.skills; const a = state.adapt;
+  for (const s of SK_KEYS){ if (a && a.skills && a.skills[s] && a.skills[s].n > 0) out[s] = a.skills[s].m; else if (e && e[s] != null) out[s] = e[s]; else out[s] = null; }
+  return out;
+}
+function exercisePlan(mode){
+  const f = todayFocus(); const plan = [];
+  const weakC = f.weak.length ? f.weak : ["kasus", "passiv"];
+  const add = (cat, role, n) => { const nd = node("cat", cat); const d = clampD(role === "strong" ? nd.d + 0.5 : nd.d - 0.1); for (let i = 0; i < n; i++) plan.push({ cat, role, d }); };
+  if (mode === "strong"){
+    const st = strongCats(3); const list = st.length ? st : activeCats().map(c => ({ c, m: node("cat", c).m })).sort((x,y) => y.m - x.m).slice(0, 2).map(x => x.c);
+    if (!list.length) list.push(...weakC);
+    list.forEach(c => add(c, "strong", list.length === 1 ? 6 : list.length === 2 ? 3 : 2));
+  } else {
+    weakC.forEach(c => add(c, "weak", weakC.length === 1 ? 4 : 2));
+    if (f.strong) add(f.strong, "strong", 2); else add(weakC[0], "weak", 2);
+  }
+  return plan.slice(0, 6);
+}
+function adaptCard(it, q){ const sc = q === 0 ? 0 : q === 3 ? 0.6 : q === 4 ? 0.9 : 1; record("cat", normCat(it.category), sc, { w: 0.6, moveD: false }); record("skill", catSkill(it.category), sc, { w: 0.3, moveD: false }); }
+function adaptEx(x, ok){ record("cat", x.category, ok ? 1 : 0, { d: x.d }); record("skill", catSkill(x.category), ok ? 1 : 0, { d: x.d, w: 0.4 }); }
+function adaptProduce(skill, r, errs){
+  const wv = num(r && r.wert, NaN); let score = 0.5;
+  if (isFinite(wv)){ const nd = node("skill", skill); score = Math.max(0, Math.min(1, 0.75 + (wv - nd.d)*0.5)); record("skill", skill, score, { setD: wv }); }
+  (errs || []).forEach(e => record("cat", e.category, 0, { w: 0.35, moveD: false }));
+  logReview(score >= 0.6);
+}
+function initAdapt(prof){
+  const e = prof.exam, v = e.v, now = Date.now();
+  const a = { cats:{}, skills:{}, hist: (state.adapt && state.adapt.hist) || {}, today: null, v: 1 };
+  const lv = { w: e.mcV || v, g: e.mcV || v, h: v, s: e.sV || v, sc: e.wV || v };
+  for (const sk of SK_KEYS) a.skills[sk] = { m: e.skills && e.skills[sk] != null ? round3(e.skills[sk]) : 0.55, d: clampD(lv[sk]), n: 0, t: now };
+  for (const c of CAT_KEYS){ const st = catStats().find(x => x.key === c); a.cats[c] = { m: st && st.seen ? round3(1 - st.rate) : 0.6, d: clampD(v), n: 0, t: now }; }
+  state.adapt = a; saveAdaptNow();
+}
+function adaptRow(kind, key, c){
+  const nd = node(kind, key); const empty = !(nd.n > 0) && !(c && c.n > 0) && !(kind === "skill" && state.profile && state.profile.exam && state.profile.exam.skills && state.profile.exam.skills[key] != null);
+  const pct = empty ? 0 : Math.round(nd.m*100); const cls = empty ? "" : pct < 55 ? "b" : pct < 75 ? "w" : "";
+  const tr = trend(kind, key); const arrow = tr == null ? "" : tr >= 0.05 ? " ↑" : tr <= -0.05 ? " ↓" : " →";
+  const sub = (kind === "cat" && c ? c.n + " Karten · " : "") + "Stufe " + lvlFine(nd.d) + arrow + (kind === "skill" ? " · " + (nd.n || 0) + " Ergebnisse" : "");
+  return h("button",{class:"tol-row",type:"button"}, h("div",{class:"tol-name"}, kind === "cat" ? catName(key) : SKILLS[key], h("span",null, sub)), h("div",{class:"bar","aria-hidden":"true"}, h("i",{class:cls,style:"width:" + pct + "%"})), h("div",{class:"tol-val"}, empty ? "–" : pct + " %"));
+}
+function renderFocus(){
+  const host = $("focusList");
+  if (state.db && !state.adaptLoaded){ host.replaceChildren(h("div",{class:"empty"},"Wird geladen …")); return; }
+  if (!activeCats().length){ host.replaceChildren(h("div",{class:"empty"},"Noch keine Daten. Übe Karten oder eine KI-Übung.")); return; }
+  const f = todayFocus();
+  const row = (cat, role) => {
+    const nd = node("cat", cat); const pct = Math.round(nd.m*100); const lvl = role === "strong" ? clampD(nd.d + 0.5) : nd.d;
+    return h("div",{class:"pl"},
+      h("div",null, h("div",{class:"nm"}, catName(cat), h("span",{class:"chip" + (role === "strong" ? " acc" : " bad")}, role === "strong" ? "Steigern ↑" : "Festigen")), h("div",{class:"mn"}, "Sicherheit " + pct + " % · Übungsstufe " + lvlFine(lvl))),
+      h("button",{class:"btn sm" + (role === "strong" ? "" : " primary"),type:"button",onclick:()=>{ showView("training"); genExercises(role === "strong" ? "strong" : "weak"); }},"Üben"),
+      h("div",{class:"pb"}, h("b",{style:"width:" + pct + "%;background:" + (role === "strong" ? "var(--good)" : "var(--bad)")})));
+  };
+  host.replaceChildren(...f.weak.map(c => row(c, "weak")), f.strong ? row(f.strong, "strong") : h("div",{class:"pl"}, h("div",{class:"mn"},"Noch keine Stärke über 70 % Sicherheit – sobald eine Kategorie sicher sitzt, wird sie hier gesteigert.")));
+  $("focusMeta").textContent = "Stand " + new Date().toLocaleDateString("de-DE",{day:"2-digit",month:"2-digit"});
+}
+
+/* ================= Analysis & SRS ================= */
+function catStats(){
+  const now = Date.now(); const m = {};
+  for (const k of CAT_KEYS) m[k] = { key:k, n:0, seen:0, wrong:0, due:0 };
+  for (const it of state.items){ const c = m[normCat(it.category)]; c.n++; c.seen += it.seen||0; c.wrong += it.wrong||0; if ((it.due||0) <= now) c.due++; }
+  for (const c of Object.values(m)){ c.rate = (c.wrong + 1) / (c.seen + 2); c.score = c.n ? c.rate * (1 + Math.log1p(c.n)) : 0; }
+  return Object.values(m);
+}
+function weakest(){ return catStats().filter(c=>c.n>0).sort((a,b)=>b.score-a.score); }
+function dueItems(filter){ const now = Date.now(); return state.items.filter(it => (it.due||0) <= now && (!filter || filter(it))).sort((a,b)=>(a.due||0)-(b.due||0)); }
+function streak(){ let s=0; for (let i=0;i<400;i++){ const d = state.days[dayKey(Date.now()-i*DAY)]; const m = d && d.m ? SK_KEYS.reduce((a,k)=>a+(d.m[k]||0),0) : 0; if ((d && d.r>0) || m >= 1) s++; else if (i===0) continue; else break; } return s; }
+function intervals(it){
+  const b = (it.reps||0) > 0 ? Math.max(1, it.interval||1) : 0; const ease = it.ease || 2.5;
+  if (!b) return { 3:1, 4:3, 5:6 };
+  const hard = Math.max(b + 1, Math.round(b * 1.2)); const good = Math.max(hard + 1, Math.round(b * ease)); const easy = Math.max(good + 1, Math.round(b * ease * 1.35));
+  return { 3:hard, 4:good, 5:easy };
+}
+function schedule(it, q){
+  const now = Date.now(); let ease = it.ease || 2.5, interval, reps = it.reps || 0, lapses = it.lapses || 0, seen = (it.seen||0)+1, wrong = it.wrong||0, due;
+  if (q < 3){ reps = 0; interval = 0; lapses++; wrong++; ease = Math.max(1.3, ease - 0.2); due = now + 10*60000; }
+  else { interval = intervals(it)[q]; reps++; ease = Math.min(3.0, Math.max(1.3, ease + (q === 3 ? -0.15 : q === 5 ? 0.15 : 0))); due = startOfDay(now) + interval*DAY + 3*3600000; }
+  return { ease: Math.round(ease*100)/100, interval, reps, lapses, seen, wrong, due, last: now };
+}
+function fmtInterval(it, q){ if (q < 3) return "10 Min"; const d = intervals(it)[q]; if (d >= 60) return (Math.round(d/3)/10).toString().replace(".",",") + " Mon."; return d === 1 ? "1 Tag" : d + " Tage"; }
+
+/* ================= Claude helpers ================= */
+function profileLine(){
+  const p = state.profile || {};
+  const v = currentV(p);
+  return `Lerner: ${str(p.beruf,120) || "Ingenieur"}; Fachgebiet: ${str(p.fach,160) || "Maschinenbau"}; Interessen: ${(p.themen||[]).concat(p.themenFrei ? [p.themenFrei] : []).join(", ") || "Fertigungstechnik"}; Muttersprache: ${str(p.muttersprache,40) || "Persisch"}; aktuelles Niveau ca. ${v ? lvlLabel(v) : (p.selbst || "B1")}; Ziel: ${p.zielNiveau || "B2"} (${str(p.ziel,80) || "Beruf"}).`;
+}
+function sampleErr(e){
+  const c = e && e.code;
+  if (c === "cancelled") return "Abgebrochen.";
+  if (c === "no_key") return "Kein API-Schlüssel. Trage ihn unter Profil → KI-Schlüssel ein.";
+  if (c === "bad_key") return "API-Schlüssel ungültig. Prüfe ihn unter Profil → KI-Schlüssel.";
+  if (c === "no_credit") return "Kein Guthaben im Anthropic-Konto. Lade unter console.anthropic.com → Billing auf.";
+  if (c === "bad_model") return "Modell nicht verfügbar. Wähle unter Profil → KI-Schlüssel ein anderes Modell.";
+  if (c === "not_granted" || c === "sampling_disabled" || c === "not_declared") return "Die KI-Funktion wurde nicht erlaubt. Gib sie über das Berechtigungsmenü der App frei.";
+  if (c === "rate_limited") return "Gerade zu viele Anfragen. Versuch es in ein paar Minuten noch einmal.";
+  if (c === "invalid_json") return "Die Antwort war unvollständig. Tippe noch einmal auf den Knopf.";
+  if (c === "session_expired") return "Bitte melde dich bei Claude neu an.";
+  if (c === "refused") return "Das konnte nicht bearbeitet werden. Formuliere es um.";
+  return "Verbindung unterbrochen. Versuch es noch einmal.";
+}
+function hasKey(){ try { return !!localStorage.getItem("fd.apikey"); } catch(e){ return false; } }
+function needAI(statusEl){
+  if (window.FD_STANDALONE && !hasKey()){ if (statusEl) statusEl.textContent = "Trage zuerst unter Profil → KI-Schlüssel deinen Anthropic-API-Schlüssel ein."; return false; }
+  if (state.sample) return true; if (statusEl) statusEl.textContent = "Diese Funktion braucht die KI. Öffne die App über Claude (angemeldet)."; return false; }
+async function ask(prompt, opts){ return state.sample.json(prompt, Object.assign({ cache: false }, opts || {})); }
+
+/* ================= Rule details (DE / EN / FA) ================= */
+function sanitizeDetail(d){
+  const ex = Array.isArray(d.beispiele) ? d.beispiele.slice(0,4).map(b => ({ de: str(b && b.de, 300), en: str(b && b.en, 300) })).filter(b=>b.de) : [];
+  const f = d.typischer_fehler && typeof d.typischer_fehler === "object" ? { falsch: str(d.typischer_fehler.falsch,300), richtig: str(d.typischer_fehler.richtig,300), warum: str(d.typischer_fehler.warum,300) } : null;
+  return { v: 2, uebersetzung_en: str(d.uebersetzung_en,600), satz: str(d.satz,600), regel_de: str(d.regel_de,1500), regel_en: str(d.regel_en,1200), regel_fa: str(d.regel_fa,1800), merksatz_fa: str(d.merksatz_fa,300), beispiele: ex, fehler: f && f.richtig ? f : null, merksatz: str(d.merksatz,300) };
+}
+function detailPrompt(src){
+  return `Erkläre die Regel hinter dieser Lernkarte – ausführlich, aber klar. ${profileLine()}
+Aufgabe: ${str(src.front,600)}
+Lösung: ${str(src.back,600)}
+Kurzregel: ${str(src.note,400) || "(keine)"}
+Kategorie: ${catName(normCat(src.category))}
+Antworte NUR mit einem JSON-Objekt:
+{"uebersetzung_en":"englische Übersetzung der Lösung bzw. des ganzen richtigen Satzes","satz":"die Lösung als vollständiger richtiger deutscher Satz (leer, wenn sie schon ein ganzer Satz ist)","regel_de":"die Regel in einfachem Deutsch, 3–6 Sätze, mit dem Warum","regel_en":"dieselbe Regel auf Englisch, 2–4 Sätze","regel_fa":"dieselbe Regel auf Persisch (Farsi) in natürlichem, gut verständlichem Stil, 3–6 Sätze; deutsche Wörter und Beispiele in lateinischer Schrift lassen","merksatz_fa":"kurzer Merksatz auf Persisch","beispiele":[{"de":"Beispielsatz aus Beruf oder Fachgebiet des Lerners","en":"englische Übersetzung"}],"typischer_fehler":{"falsch":"typischer Fehler persisch- oder englischsprachiger Lerner","richtig":"korrekte Form","warum":"kurz"},"merksatz":"kurzer Merksatz auf Deutsch"}
+Genau 3 Beispiele. Prüfe Genus, Kasus und Endungen doppelt.`;
+}
+function blk(title, ...kids){ return h("div",null, h("h4",null,title), ...kids); }
+function renderDetail(host, d){
+  host.replaceChildren(
+    d.uebersetzung_en ? blk("Übersetzung", h("div",{class:"say"}, h("div",{class:"t"}, d.uebersetzung_en), spk(d.uebersetzung_en, "en-GB"))) : null,
+    d.satz ? blk("Ganzer Satz", say(d.satz)) : null,
+    d.regel_de ? blk("Regel", say(d.regel_de), d.regel_en ? h("div",{class:"muted",style:"margin-top:6px;font-size:14px"}, d.regel_en) : null) : null,
+    d.regel_fa ? h("div",{class:"fa-box"}, h("h4",{class:"fa",dir:"rtl",lang:"fa"},"توضیح قاعده به فارسی"), fa(d.regel_fa), d.merksatz_fa ? fa("✦ " + d.merksatz_fa) : null) : null,
+    d.beispiele && d.beispiele.length ? blk("Beispiele", ...d.beispiele.map(b => h("div",{class:"exm"}, say(b.de), b.en ? h("div",{class:"muted"}, b.en) : null))) : null,
+    d.fehler ? blk("Typischer Fehler", h("div",null, d.fehler.falsch ? h("span",{class:"wrong"}, d.fehler.falsch) : null, d.fehler.falsch ? " → " : null, h("span",{class:"right"}, d.fehler.richtig)), d.fehler.warum ? h("div",{class:"muted",style:"font-size:14px"}, d.fehler.warum) : null) : null,
+    d.merksatz ? h("div",{class:"merk"}, say(d.merksatz)) : null
+  );
+}
+async function toggleDetail(host, btn, src, itemId, openKey){
+  if (!host.hidden){ host.hidden = true; btn.setAttribute("aria-expanded","false"); if (openKey) state.open.delete(openKey); return; }
+  host.hidden = false; btn.setAttribute("aria-expanded","true"); if (openKey) state.open.add(openKey);
+  track("g");
+  if (host.dataset.ready === "1" || host.dataset.loading === "1") return;
+  const live = itemId ? (state.items.find(x=>x.id===itemId) || src) : src;
+  if (live.detail && live.detail.regel_de && live.detail.regel_fa){ renderDetail(host, live.detail); host.dataset.ready = "1"; return; }
+  if (!state.sample){ host.replaceChildren(h("div",{class:"muted"}, (live.note ? live.note + " · " : "") + "Die ausführliche Erklärung braucht die KI. Öffne die App über Claude.")); return; }
+  host.dataset.loading = "1";
+  host.replaceChildren(h("div",{class:"muted"},"Erklärung wird erstellt … (5–30 Sekunden)"));
+  try {
+    const d = sanitizeDetail(await state.sample.json(detailPrompt(live), { cache: { gcTime: 86400000 } }) || {});
+    if (!d.regel_de) throw { code: "invalid_json" };
+    renderDetail(host, d); host.dataset.ready = "1";
+    src.detail = d; if (!src.en && d.uebersetzung_en) src.en = d.uebersetzung_en;
+    if (itemId){ const patch = { detail: d }; if (!live.en && d.uebersetzung_en) patch.en = d.uebersetzung_en; if (!live.satz && d.satz) patch.satz = d.satz; try { await updateItem(itemId, patch); } catch(e){} }
+  } catch(e){
+    host.replaceChildren(h("div",{class:"err"}, sampleErr(e)), h("button",{class:"btn sm",type:"button",style:"margin-top:8px",onclick:()=>{ host.hidden = true; toggleDetail(host, btn, src, itemId, openKey); }},"Erneut versuchen"));
+  } finally { delete host.dataset.loading; }
+}
+function ruleBlock(src, itemId, openKey){
+  const btn = h("button",{class:"rulebtn",type:"button","aria-expanded":"false"}, h("span",{class:"t"}, src.note || "Regel, Übersetzung, Beispiele"), h("span",{class:"chip acc"},"Details · فارسی"));
+  const host = h("div",{class:"detail",hidden:true});
+  btn.addEventListener("click", ()=>toggleDetail(host, btn, src, itemId, openKey));
+  if (openKey && state.open.has(openKey)){ state.open.delete(openKey); setTimeout(()=>toggleDetail(host, btn, src, itemId, openKey), 0); }
+  return h("div",null, btn, host);
+}
+
+/* ================= Error list (shared by writing / speaking) ================= */
+function mapErrors(arr){
+  return (Array.isArray(arr) ? arr : []).filter(f=>f && f.richtig).slice(0,15).map(f => ({
+    front: f.falsch ? "Korrigiere: „" + str(f.falsch,300) + "“" : "Formuliere richtig: " + str(f.richtig,300),
+    back: str(f.richtig,400), satz: str(f.satz,600), en: str(f.englisch,600), note: str(f.erklaerung,300), category: normCat(f.kategorie), falsch: str(f.falsch,300) }));
+}
+function errorList(errs, source){
+  if (!errs.length) return h("div",{class:"empty list"},"Keine Fehler gefunden.");
+  const boxes = [];
+  const rows = errs.map((f,i) => {
+    const cb = h("input",{type:"checkbox",checked:true,"aria-label":"Als Karte speichern"}); boxes.push(cb);
+    return h("div",{class:"fix"}, cb, h("div",{style:"min-width:0;overflow-wrap:anywhere"},
+      h("div",{class:"say"}, h("div",{class:"t"}, f.falsch ? h("span",{class:"wrong"}, f.falsch) : null, f.falsch ? " → " : null, h("span",{class:"right"}, f.back)), spk(f.satz || f.back, "de-DE", "Korrektur vorlesen")),
+      f.satz ? h("div",{style:"font-size:14px;margin-top:4px"}, "„" + f.satz + "“") : null,
+      enLine(f.en), h("span",{class:"chip",style:"margin-top:6px"}, catName(f.category)), ruleBlock(f, null, null)));
+  });
+  const save = h("button",{class:"btn primary",type:"button"},"Ausgewählte als Karten speichern");
+  save.addEventListener("click", async ()=>{
+    save.disabled = true; let n = 0;
+    for (let i=0;i<errs.length;i++){ if (!boxes[i].checked) continue; const f = errs[i];
+      try { await addItem({ front:f.front, back:f.back, satz:f.satz, en:f.en, note:f.note, category:f.category, kind:"fehler", source, detail:f.detail }); n++; } catch(e){ toast("Speichern fehlgeschlagen"); break; } }
+    save.textContent = n + " Karten gespeichert"; toast(n + " Karten gespeichert");
+  });
+  return h("div",null, h("div",{class:"list"}, ...rows), h("div",{class:"row",style:"margin-top:10px"}, save));
+}
+function critRow(o, labels){ return h("div",{class:"crit"}, ...labels.map(([k,l]) => h("div",null, h("b",null, o[k] != null ? String(Math.max(1,Math.min(5,Math.round(num(o[k],0))))) + "/5" : "–"), l))); }
+
+/* ================= Rendering: Heute ================= */
+const SK_START = { w: () => startSession("words"), g: () => startSession("rules"), h: () => { showView("sprechen"); $("startDict").focus(); }, s: () => { showView("sprechen"); $("genSpeak").focus(); }, sc: () => { showView("schreiben"); $("genWrite").focus(); } };
+const SK_DESC = { w:"Fachbegriffe & Artikel (Karten)", g:"Regeln & KI-Übungen", h:"Hördiktat & Hörverstehen", s:"Sprechaufgabe & Nachsprechen", sc:"Schreibaufgabe mit Korrektur" };
+function renderHome(){
+  const p = state.profile;
+  $("todayDate").textContent = new Date().toLocaleDateString("de-DE",{weekday:"short",day:"2-digit",month:"2-digit"});
+  const d = state.days[dayKey()] || {}; const m = d.m || {};
+  const today = SK_KEYS.reduce((a,s)=>a+(m[s]||0),0);
+  $("kMin").replaceChildren(String(Math.round(today)), h("small",null," Min"));
+  $("kDue").textContent = dueItems().length;
+  const v = p ? currentV(p) : null;
+  $("kLvl").textContent = v ? lvlLabel(v) : "–";
+  const s = streak(); $("kStreak").replaceChildren(String(s), h("small",null, s===1?" Tag":" Tage"));
+  $("protoLine").textContent = p && p.zielNiveau ? (v ? lvlLabel(v) : "?") + " → " + p.zielNiveau + (p.zielDatum ? " · " + fmtDate(p.zielDatum + "T12:00:00") : "") : "Prüfprotokoll";
+  // plan
+  const alloc = allocation(p || {});
+  const planTotal = SK_KEYS.reduce((a,k)=>a+alloc[k],0);
+  $("planMeta").textContent = Math.round(today) + " / " + planTotal + " Min";
+  $("planList").replaceChildren(...SK_KEYS.map(k => {
+    const done = m[k] || 0, goal = alloc[k]; const pct = Math.min(100, Math.round(100*done/goal));
+    const b = h("button",{class:"btn sm" + (done < goal ? " primary" : " ghost"),type:"button",onclick:SK_START[k]}, done < goal ? "Start" : "Mehr");
+    return h("div",{class:"pl" + (done >= goal ? " done" : "")},
+      h("div",null, h("div",{class:"nm"}, h("i",{style:"background:"+SK_COLOR[k]}), SKILLS[k]), h("div",{class:"mn"}, SK_DESC[k] + " · " + Math.round(done) + "/" + goal + " Min")),
+      b, h("div",{class:"pb"}, h("b",{style:"width:"+pct+"%;background:"+SK_COLOR[k]})));
+  }));
+  // verdict
+  if (p && p.zielNiveau){ $("goalMeta").textContent = "Ziel " + p.zielNiveau; $("homeVerdict").replaceChildren(verdictBox(computePlan(p), p, true)); }
+  renderFocus();
+  if (state.view === "fortschritt") renderProgress();
+}
+function verdictBox(pl, p, compact){
+  const pace = paceMinutes();
+  if (pl.status === "erreicht") return h("div",{class:"verdict"}, h("div",{class:"big"},"Ziel " + p.zielNiveau + " ist erreicht (geschätzt)."), h("div",null,"Mach den Einstufungstest erneut, um es zu bestätigen, und setz ein neues Ziel."));
+  const cls = pl.status === "ok" ? "" : pl.status === "knapp" ? " knapp" : " nein";
+  const head = pl.status === "ok" ? "Mit " + pl.planned + " Min/Tag erreichst du " + p.zielNiveau + " rechtzeitig."
+    : pl.status === "knapp" ? "Knapp: Du brauchst mindestens " + pl.req + " Min/Tag."
+    : "Mit " + pl.planned + " Min/Tag schaffst du " + p.zielNiveau + " bis " + fmtDate(pl.target) + " nicht.";
+  const lines = [
+    "Noch ca. " + Math.round(pl.needH) + " Lernstunden (Spanne " + Math.round(pl.needLo) + "–" + Math.round(pl.needHi) + " h) von " + lvlLabel(pl.v0) + " bis " + p.zielNiveau + ".",
+    "Minimum bis " + fmtDate(pl.target) + ": " + pl.req + " Min/Tag (Spanne " + pl.reqLo + "–" + pl.reqHi + ")" + (pl.imm >= 1 ? ", Deutsch bei der Arbeit schon eingerechnet." : "."),
+    "Mit " + pl.planned + " Min/Tag: Ziel ca. " + fmtDate(pl.eta) + " (zwischen " + fmtDate(pl.etaLo) + " und " + fmtDate(pl.etaHi) + ")."
+  ];
+  if (pace != null) lines.push("Dein echtes Tempo (14 Tage): " + Math.round(pace) + " Min/Tag → Ziel ca. " + fmtDate(Date.now() + pl.needH*60/(pace + pl.imm)*DAY) + ".");
+  if (pl.status === "nein") lines.push(pl.req > 240 ? "Mehr als 4 Std./Tag ist nicht realistisch. Frühester sinnvoller Termin bei 90 Min/Tag: " + fmtDate(pl.date90) + "." : "Vorschlag: " + pl.req + " Min/Tag einplanen oder das Zieldatum auf " + fmtDate(pl.eta) + " verschieben.");
+  return h("div",{class:"verdict" + cls}, h("div",{class:"big"}, head), ...(compact ? lines.slice(1,3) : lines).map(l => h("div",{class:compact?"muted":""}, l)));
+}
+function tolRow(c){
+  const pct = c.n ? Math.round(c.rate*100) : 0; const cls = !c.n ? "" : c.rate > 0.4 ? "b" : c.rate > TOL ? "w" : "";
+  return h("button",{class:"tol-row",type:"button"},
+    h("div",{class:"tol-name"}, catName(c.key), h("span",null, c.n+" Karten · "+c.due+" fällig")),
+    h("div",{class:"bar tolline","aria-hidden":"true"}, h("i",{class:cls,style:"width:"+Math.min(100,pct)+"%"})),
+    h("div",{class:"tol-val"}, c.n ? pct+" %" : "–"));
+}
+
+/* ================= Rendering: Fortschritt ================= */
+function renderProgress(){
+  const p = state.profile || {};
+  const vNow = currentV(p), v0 = p.exam ? p.exam.v : null, vG = LEVEL_V[p.zielNiveau] || null;
+  // scale
+  const W = 420, H = 120, L = 18, R = W - 18, y = 56; const x = v => L + (R - L) * Math.max(0, Math.min(6, v)) / 6;
+  const ns = "http://www.w3.org/2000/svg"; const s = (tag, a, txt) => { const e = document.createElementNS(ns, tag); for (const k in a) e.setAttribute(k, a[k]); if (txt != null) e.textContent = txt; return e; };
+  const svg = s("svg",{viewBox:`0 0 ${W} ${H}`,role:"img","aria-label":"Niveau-Skala von A1 bis C2"});
+  svg.append(s("line",{x1:L,x2:R,y1:y,y2:y,stroke:"var(--line-strong)","stroke-width":2}));
+  for (let i=0;i<=6;i++){
+    svg.append(s("line",{x1:x(i),x2:x(i),y1:y-8,y2:y+8,stroke:"var(--ink)","stroke-width":1.5}));
+    if (i < 6) svg.append(s("line",{x1:x(i+0.5),x2:x(i+0.5),y1:y-4,y2:y+4,stroke:"var(--line-strong)","stroke-width":1}));
+    if (i >= 1) svg.append(s("text",{x:x(i),y:y+26,"text-anchor":"middle","font-size":13,"font-weight":600,fill:"var(--ink)","font-family":"var(--f-mono)"}, LEVELS[i-1]));
+  }
+  if (v0 != null && vNow != null) svg.append(s("rect",{x:x(v0),y:y-5,width:Math.max(2,x(vNow)-x(v0)),height:10,fill:"var(--good)"}));
+  if (vNow != null && vG != null && vG > vNow) svg.append(s("rect",{x:x(vNow),y:y-3,width:x(vG)-x(vNow),height:6,fill:"var(--accent-soft)",stroke:"var(--accent)","stroke-width":1}));
+  const mark = (v, label, color, up) => { if (v == null) return; svg.append(s("circle",{cx:x(v),cy:y,r:6,fill:color,stroke:"var(--surface)","stroke-width":2})); svg.append(s("text",{x:Math.min(R-4,Math.max(L+4,x(v))),y:up?y-16:y+44,"text-anchor":"middle","font-size":11,fill:color,"font-family":"var(--f-mono)"}, label)); };
+  mark(v0, "Test " + lvlLabel(v0), "var(--muted)", false);
+  mark(vNow, "jetzt " + lvlLabel(vNow), "var(--good)", true);
+  if (vG) mark(vG, "Ziel " + p.zielNiveau, "var(--accent)", !(vNow != null && Math.abs(x(vG) - x(vNow)) < 70));
+  $("scale").replaceChildren(svg, h("div",{class:"tol-legend"},"Grün = Fortschritt seit dem Test (aus deiner Lernzeit geschätzt). Mach alle 4–6 Wochen den Test neu, um die Schätzung zu korrigieren."));
+  $("progVerdict").replaceChildren(p.zielNiveau ? verdictBox(computePlan(p), p, false) : h("div",{class:"empty"},"Lege im Profil dein Ziel fest."));
+  // minutes chart
+  const CW = 420, CH = 200, pl = 28, pb = 24, pt = 10, n = 14;
+  const data = []; for (let i=n-1;i>=0;i--){ const t = Date.now()-i*DAY; const d = state.days[dayKey(t)]; data.push({ t, m: (d && d.m) || {} }); }
+  const tot = d => SK_KEYS.reduce((a,k)=>a+(d.m[k]||0),0);
+  const alloc = allocation(p); const goal = SK_KEYS.reduce((a,k)=>a+alloc[k],0);
+  const top = Math.ceil(Math.max(goal, 30, ...data.map(tot)) / 15) * 15;
+  const svg2 = s("svg",{viewBox:`0 0 ${CW} ${CH}`,role:"img","aria-label":"Lernminuten der letzten 14 Tage"});
+  const hh = CH - pt - pb, bw = (CW - pl - 8) / n;
+  for (const v of [0, top/2, top]){ const yy = pt + hh*(1 - v/top); svg2.append(s("line",{x1:pl,x2:CW-4,y1:yy,y2:yy,stroke:"var(--line)","stroke-width":1})); svg2.append(s("text",{x:pl-5,y:yy+4,"text-anchor":"end","font-size":11,fill:"var(--muted)","font-family":"var(--f-mono)"}, String(Math.round(v)))); }
+  const gy = pt + hh*(1 - goal/top); svg2.append(s("line",{x1:pl,x2:CW-4,y1:gy,y2:gy,stroke:"var(--accent)","stroke-width":1.5,"stroke-dasharray":"5 4"}));
+  data.forEach((d,i) => {
+    let acc = 0; const bx = pl + i*bw + bw*0.18, w = bw*0.64;
+    for (const k of SK_KEYS){ const v = d.m[k] || 0; if (!v) continue; const y1 = pt + hh*(1 - (acc+v)/top), y0 = pt + hh*(1 - acc/top); svg2.append(s("rect",{x:bx,y:y1,width:w,height:Math.max(0.5,y0-y1),fill:SK_COLOR[k]})); acc += v; }
+    if (i%2===1 || i===n-1) svg2.append(s("text",{x:bx+w/2,y:CH-8,"text-anchor":"middle","font-size":11,fill:"var(--muted)","font-family":"var(--f-mono)"}, new Date(d.t).getDate()+"."));
+  });
+  $("minChart").replaceChildren(svg2, h("div",{class:"legend"}, ...SK_KEYS.map(k => h("span",null, h("i",{style:"background:"+SK_COLOR[k]}), SKILLS[k])), h("span",null,"– – Tagesziel " + goal + " Min")));
+  // skills (adaptive)
+  $("skillBars").replaceChildren(...SK_KEYS.map(k => { const r = adaptRow("skill", k); r.style.cursor = "default"; return r; }));
+  renderCats();
+}
+function itemRow(it, keyPrefix, extra){
+  return h("div",{class:"li"},
+    h("div",{class:"a"}, h("div",{class:"q"}, it.front), h("div",{class:"r"}, it.back), it.en ? h("div",{class:"r",style:"font-size:13px"}, "EN: " + it.en) : null, extra || null, ruleBlock(it, it.id, keyPrefix + it.id)),
+    h("div",{class:"x"}, spk(it.satz || it.back, "de-DE", "Lösung vorlesen")));
+}
+function renderCats(){
+  const host = $("allCats"); host.replaceChildren();
+  for (const c of catStats().sort((a,b)=> ((b.n>0) - (a.n>0)) || (node("cat",a.key).m - node("cat",b.key).m))){
+    const row = adaptRow("cat", c.key, c); row.setAttribute("aria-expanded","false");
+    const det = h("div",{class:"tol-detail",hidden:true});
+    const fill = () => {
+      const worst = state.items.filter(it=>normCat(it.category)===c.key).sort((a,b)=>(b.lapses||0)-(a.lapses||0)).slice(0,8);
+      det.replaceChildren(worst.length ? h("div",{class:"list",style:"margin-top:6px"}, ...worst.map(it => itemRow(it, "cat:", h("div",{style:"margin-top:4px"}, h("span",{class:"chip"+((it.lapses||0)>1?" bad":"")}, (it.lapses||0)+"× falsch"))))) : h("div",{class:"empty"},"Keine Karten in dieser Kategorie."),
+        c.n ? h("div",{class:"row",style:"margin-top:8px"}, h("button",{class:"btn sm primary",type:"button",onclick:()=>startSession("focus",c.key)},"Diese Kategorie trainieren")) : null);
+    };
+    row.addEventListener("click", ()=>{ const open = det.hidden; det.hidden = !open; row.setAttribute("aria-expanded", open?"true":"false"); state.openCat = open ? c.key : (state.openCat === c.key ? null : state.openCat); if (open) fill(); });
+    if (state.openCat === c.key){ det.hidden = false; row.setAttribute("aria-expanded","true"); fill(); }
+    host.append(row, det);
+  }
+}
+function renderRecent(){
+  const list = [...state.items].sort((a,b)=>(b.created||0)-(a.created||0)).slice(0,15);
+  $("recentCount").textContent = state.items.length + " Karten";
+  const host = $("recentList");
+  if (!list.length){ host.replaceChildren(h("div",{class:"empty"},"Noch keine Karten.")); return; }
+  host.replaceChildren(...list.map(it => {
+    const del = h("button",{class:"btn sm ghost",type:"button","aria-label":"Karte löschen"},"Löschen");
+    del.addEventListener("click", async ()=>{ if (del.dataset.armed){ del.disabled = true; try { await deleteItem(it.id); toast("Karte gelöscht"); } catch(e){ toast("Löschen fehlgeschlagen"); del.disabled = false; } } else { del.dataset.armed = "1"; del.textContent = "Wirklich?"; setTimeout(()=>{ if (del.isConnected){ delete del.dataset.armed; del.textContent = "Löschen"; } }, 3000); } });
+    const row = itemRow(it, "rec:", h("div",{style:"margin-top:4px;display:flex;gap:6px;flex-wrap:wrap"}, h("span",{class:"chip"}, catName(it.category)), it.source && it.source !== "manuell" ? h("span",{class:"chip acc"}, it.source) : null));
+    row.querySelector(".x").append(del); return row;
+  }));
+}
+function renderLists(){ renderHome(); if (state.view === "training") renderRecent(); if (state.view === "fortschritt") renderProgress(); }
+
+/* ================= Card training ================= */
+function startSession(mode, cat){
+  let q = [];
+  const isWord = it => catSkill(it.category) === "w";
+  if (mode === "due") q = dueItems().sort((a,b)=> (node("cat",normCat(a.category)).m - node("cat",normCat(b.category)).m) || ((a.due||0)-(b.due||0))).slice(0,30);
+  else if (mode === "words") q = dueItems(isWord).concat(shuffle(state.items.filter(it => isWord(it) && (it.due||0) > Date.now()))).slice(0,20);
+  else if (mode === "rules") q = dueItems(it => !isWord(it)).concat(shuffle(state.items.filter(it => !isWord(it) && (it.due||0) > Date.now()))).slice(0,20);
+  else if (mode === "focus"){ const k = cat || todayFocus().weak[0] || (weakest()[0]||{}).key; if (!k) return; q = state.items.filter(it=>normCat(it.category)===k).sort((a,b)=>((b.lapses||0)-(a.lapses||0)) || ((a.due||0)-(b.due||0))).slice(0,20); }
+  if (!q.length){ toast("Keine passenden Karten"); return; }
+  state.session = { queue: q.map(i=>i.id), total: q.length, done: 0, shown: false, right: 0, spoken: "" };
+  showView("training"); $("trainArea").hidden = false; $("trainSetup").hidden = true;
+  trk.last = Date.now(); renderCard(); $("trainArea").scrollIntoView({block:"start"});
+}
+function endSession(msg){
+  const s = state.session; state.session = null;
+  try { if (TTS.ok) window.speechSynthesis.cancel(); } catch(e){}
+  $("trainArea").hidden = true; $("trainSetup").hidden = false;
+  if (s && s.done) toast(msg || (s.right + " von " + s.done + " richtig"));
+  renderHome();
+}
+function renderCard(){
+  const s = state.session; if (!s) return;
+  let it = null;
+  while (s.queue.length && !(it = state.items.find(x=>x.id===s.queue[0]))) s.queue.shift();
+  if (!it){ endSession("Training fertig: " + s.right + " von " + s.done + " richtig"); return; }
+  $("trainProg").style.width = Math.round(100*s.done/Math.max(s.total,1)) + "%";
+  const frontSpk = spk(it.front, "de-DE", "Aufgabe vorlesen");
+  const card = h("div",{class:"card"},
+    h("div",{class:"strip"}, h("span",null, catName(it.category)), h("span",null, (s.done+1) + " / " + s.total)),
+    h("div",{class:"front"}, h("div",{class:"say"}, h("div",{class:"t"}, it.front), frontSpk)));
+  let backSpk = null;
+  if (!s.shown){
+    card.append(h("div",{style:"padding:0 16px 16px"}, h("button",{class:"btn primary",type:"button",style:"width:100%",id:"revealBtn",onclick:()=>{ s.shown = true; track(catSkill(it.category)); renderCard(); }},"Lösung zeigen")));
+  } else {
+    backSpk = spk(it.satz || it.back, "de-DE", "Lösung vorlesen");
+    card.append(h("div",{class:"back"},
+      h("div",{class:"say"}, h("div",{class:"t right"}, it.back), backSpk),
+      it.satz && norm(it.satz) !== norm(it.back) ? h("div",{class:"full"}, "„" + it.satz + "“") : null,
+      enLine(it.en), ruleBlock(it, it.id, null)));
+    const g = (q, label, cls) => h("button",{type:"button",class:cls,onclick:()=>grade(it,q)}, label, h("small",null, fmtInterval(it,q)));
+    card.append(h("div",{class:"grades"}, g(0,"Nochmal","g0"), g(3,"Schwer",""), g(4,"Gut",""), g(5,"Leicht","g5")));
+  }
+  $("cardHost").replaceChildren(card);
+  const rb = document.getElementById("revealBtn"); if (rb) rb.focus({preventScroll:true});
+  const key = it.id + (s.shown ? ":b" : ":f");
+  if (TTS.auto && s.spoken !== key){ s.spoken = key; if (s.shown) speak(it.satz || it.back, "de-DE", backSpk); else speak(it.front, "de-DE", frontSpk); }
+}
+async function grade(it, q){
+  const s = state.session; if (!s) return;
+  const patch = schedule(it, q);
+  s.queue.shift(); s.done++; if (q >= 3) s.right++;
+  if (q < 3){ s.queue.splice(Math.min(3, s.queue.length), 0, it.id); s.total++; }
+  s.shown = false; Object.assign(it, patch);
+  track(catSkill(it.category)); logReview(q >= 3); adaptCard(it, q); renderCard();
+  try { await updateItem(it.id, patch); } catch(e){ toast("Speichern fehlgeschlagen. Prüfe die Verbindung."); }
+}
+
+/* ================= KI exercises (grammar) ================= */
+let exCtl = null;
+async function genExercises(mode){
+  if (!needAI($("exStatus"))) return;
+  mode = mode === "strong" ? "strong" : "weak";
+  const plan = exercisePlan(mode);
+  const cats = [...new Set(plan.map(x => x.cat))];
+  const examples = state.items.filter(it => (it.lapses||0) > 0 && cats.includes(normCat(it.category))).sort((a,b)=>(b.lapses||0)-(a.lapses||0)).slice(0,10).map(it => "- [" + catName(it.category) + "] " + it.front + " → " + it.back).join("\n") || "(noch keine)";
+  exCtl = new AbortController(); $("genEx").disabled = true; $("genCh").disabled = true; $("stopEx").hidden = false; $("exHost").replaceChildren();
+  const label = [...new Set(plan.map(x => catName(x.cat) + " " + lvlFine(x.d) + (x.role === "strong" ? " ↑" : "")))].join(" · ");
+  $("exStatus").textContent = (mode === "strong" ? "Stärken steigern: " : "Schwächen festigen: ") + label + " … (10–40 Sekunden)";
+  $("exStatus").scrollIntoView({ block: "center" });
+  try {
+    const arr = await ask(`Erstelle genau ${plan.length} Deutsch-Übungsaufgaben. ${profileLine()}
+Aufgabenliste in dieser Reihenfolge (Kategorie, GER-Niveau der Aufgabe, Zweck):
+Skala: 1 = A1, 2 = A2, 3 = B1, 4 = B2, 5 = C1, 6 = C2 erreicht; Nachkommastellen = Weg zur nächsten Stufe.
+${plan.map((x,i) => (i+1) + ". " + catName(x.cat) + " – Niveau " + lvlFine(x.d) + " – " + (x.role === "strong" ? "Herausforderung: anspruchsvollere Strukturen und Wortschatz genau dieses Niveaus" : "Festigung: eine typische Fehlerquelle sicher machen")).join("\n")}
+Bisherige Fehler in diesen Kategorien:
+${examples}
+Kontext: sein Fachgebiet und seine Interessen. Mische Lückentext (Lücke als ___), Satzumbau und Übersetzung aus dem Englischen. Das Niveau jeder Aufgabe muss dem angegebenen GER-Niveau entsprechen (Satzlänge, Struktur, Wortschatz). Kurze, eindeutige Lösungen.
+Antworte NUR mit einem JSON-Array in derselben Reihenfolge: [{"frage":"Aufgabe mit Anweisung","loesung":"richtige Antwort","satz":"vollständiger richtiger Satz","englisch":"englische Übersetzung","erklaerung":"Regel, max. 15 Wörter"}]`, { signal: exCtl.signal });
+    const raw = (Array.isArray(arr) ? arr : []).filter(x => x && x.frage && x.loesung).slice(0, plan.length);
+    const list = raw.map((x,i) => { const pl = plan[i] || plan[plan.length-1]; return { front:str(x.frage,600), back:str(x.loesung,400), satz:str(x.satz,600), en:str(x.englisch,600), note:str(x.erklaerung,300), category: pl.cat, d: pl.d, role: pl.role }; });
+    if (!list.length) throw { code: "invalid_json" };
+    $("exStatus").textContent = "Antworte, dann prüfen. Jede Antwort passt deine Stufe an.";
+    $("exHost").replaceChildren(...list.map((x,i) => exerciseEl(x,i)));
+  } catch(e){ $("exStatus").textContent = sampleErr(e); }
+  finally { $("genEx").disabled = false; $("genCh").disabled = false; $("stopEx").hidden = true; }
+}
+function exerciseEl(x, i){
+  const inp = h("input",{type:"text","aria-label":"Antwort " + (i+1),autocomplete:"off",autocapitalize:"off",spellcheck:"false"});
+  inp.addEventListener("input", ()=>track("g"));
+  const out = h("div"); const check = h("button",{class:"btn sm primary",type:"button"},"Prüfen");
+  check.addEventListener("click", ()=>{
+    check.disabled = true; inp.readOnly = true; track("g");
+    const a = norm(inp.value); const auto = !!a && (a === norm(x.back) || (x.satz && a === norm(x.satz)));
+    const solSpk = spk(x.satz || x.back, "de-DE", "Lösung vorlesen");
+    const done = async ok => { out.querySelectorAll(".judge button").forEach(b=>b.disabled=true); logReview(ok); adaptEx(x, ok);
+      if (!ok){ try { await addItem({ ...x, kind:"fehler", source:"KI-Übung" }); out.append(h("div",{class:"err",style:"margin-top:6px"},"Als Karte gespeichert.")); } catch(e){ out.append(h("div",{class:"err"},"Karte konnte nicht gespeichert werden.")); } }
+      else out.append(h("div",{class:"ok",style:"margin-top:6px"},"Richtig.")); };
+    out.replaceChildren(h("div",{class:"sol"}, h("div",{class:"say"}, h("div",{class:"t right"}, x.back), solSpk), x.satz && norm(x.satz) !== norm(x.back) ? h("div",{style:"font-size:14px;margin-top:4px"}, "„" + x.satz + "“") : null, enLine(x.en), ruleBlock(x, null, null)),
+      auto ? null : h("div",{class:"row judge",style:"margin-top:8px"}, h("button",{class:"btn sm",type:"button",onclick:()=>done(true)},"War richtig"), h("button",{class:"btn sm",type:"button",onclick:()=>done(false)},"War falsch")));
+    if (TTS.auto) speak(x.satz || x.back, "de-DE", solSpk);
+    if (auto) done(true);
+  });
+  inp.addEventListener("keydown", ev => { if (ev.key === "Enter" && !check.disabled){ ev.preventDefault(); check.click(); } });
+  return h("div",{class:"box anim"}, h("div",{class:"qn"}, "Aufgabe " + (i+1) + " · " + catName(x.category) + (x.d ? " · " + lvlFine(x.d) + (x.role === "strong" ? " ↑" : "") : "")), h("div",{class:"say"}, h("div",{class:"t"}, x.front), spk(x.front, "de-DE", "Aufgabe vorlesen")), inp, h("div",{class:"row"}, check), out);
+}
+
+/* ================= Microphone (standalone app only) =================
+   Uses Chrome's speech recognition. Sessions are short (Android stops after a pause) and are
+   restarted automatically while the button is active; each session appends to the text. */
+function micBtn(ta){
+  const SR = window.SpeechRecognition || window.webkitSpeechRecognition;
+  if (!window.FD_STANDALONE || !SR) return null;
+  const MIC_SVG = '<svg viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" aria-hidden="true"><rect x="9" y="3" width="6" height="11" rx="3" fill="currentColor"/><path d="M5 11a7 7 0 0 0 14 0M12 18v3"/></svg>';
+  const b = h("button",{class:"btn",type:"button","aria-pressed":"false"});
+  const label = on => { b.innerHTML = MIC_SVG + (on ? " Stopp" : " Sprechen"); b.classList.toggle("primary", !on); b.setAttribute("aria-pressed", on ? "true" : "false"); };
+  label(false);
+  let active = false, rec = null, base = "";
+  const startOne = () => {
+    rec = new SR(); rec.lang = "de-DE"; rec.continuous = false; rec.interimResults = true; rec.maxAlternatives = 1;
+    base = ta.value ? ta.value.replace(/\s*$/, " ") : "";
+    rec.onresult = ev => { const t = Array.from(ev.results).map(r => r[0].transcript).join(" ").trim(); ta.value = base + t; ta.dispatchEvent(new Event("input")); };
+    rec.onerror = ev => {
+      if (ev.error === "no-speech" || ev.error === "aborted") return;
+      active = false; label(false);
+      toast(ev.error === "not-allowed" || ev.error === "service-not-allowed" ? "Mikrofon nicht erlaubt. Chrome → Website-Einstellungen → Mikrofon erlauben." : ev.error === "network" ? "Spracherkennung braucht Internet." : "Spracherkennung: " + ev.error);
+    };
+    rec.onend = () => { if (active){ try { startOne(); } catch(e){ active = false; label(false); } } else label(false); };
+    rec.start();
+  };
+  b.addEventListener("click", () => {
+    if (active){ active = false; try { rec && rec.stop(); } catch(e){} label(false); return; }
+    try { if (TTS.ok) window.speechSynthesis.cancel(); } catch(e){}
+    active = true; label(true);
+    try { startOne(); } catch(e){ active = false; label(false); toast("Spracherkennung nicht verfügbar."); }
+  });
+  return b;
+}
+
+/* ================= Speaking ================= */
+async function genSpeaking(){
+  const st = $("spStatus"); if (!needAI(st)) return;
+  $("genSpeak").disabled = true; st.textContent = "Aufgabe wird erstellt …";
+  try {
+    const lv = taskLevel("s"); const t = await ask(`Erstelle EINE Sprechaufgabe für eine 1–2-minütige mündliche Antwort, GER-Niveau ${lvlLabel(lv)} (Aufgabe und erwartete Sprache genau auf diesem Niveau). ${profileLine()}
+Wechsle zwischen diesen Typen: Vorstellungsgespräch-Frage, Fachprozess erklären, Problem im Meeting schildern, Kundentelefonat, Smalltalk mit Kollegen. Wähle zufällig einen Typ (Zufallszahl: ${Math.floor(Math.random()*1000)}).
+Antworte NUR mit JSON: {"typ":"…","aufgabe":"Aufgabe auf Deutsch, 1–3 Sätze, mit Situation","aufgabe_en":"englische Übersetzung","redemittel":["3–4 nützliche Wendungen auf seinem Zielniveau"]}`);
+    if (!t || !t.aufgabe) throw { code: "invalid_json" };
+    st.textContent = ""; renderSpeakTask({ lvl: lv, typ:str(t.typ,60), aufgabe:str(t.aufgabe,600), en:str(t.aufgabe_en,600), redemittel:(Array.isArray(t.redemittel)?t.redemittel:[]).slice(0,5).map(r=>str(r,160)) });
+  } catch(e){ st.textContent = sampleErr(e); }
+  finally { $("genSpeak").disabled = false; }
+}
+function renderSpeakTask(t){
+  const ta = h("textarea",{"aria-label":"Deine gesprochene Antwort",placeholder:"Mikrofon auf der Tastatur antippen und sprechen …",lang:"de"});
+  const cnt = h("span",{class:"muted"},"0 Wörter");
+  ta.addEventListener("input", ()=>{ track("s"); cnt.textContent = words(ta.value).length + " Wörter"; });
+  const res = h("div"); const go = h("button",{class:"btn primary",type:"button"},"Auswerten");
+  go.addEventListener("click", async ()=>{
+    const text = ta.value.trim(); if (words(text).length < 8){ res.replaceChildren(h("div",{class:"err"},"Sprich mindestens 2–3 Sätze.")); return; }
+    if (!needAI(null)) return;
+    go.disabled = true; res.replaceChildren(h("div",{class:"muted"},"Wird ausgewertet … (10–40 Sekunden)")); track("s");
+    try {
+      const r = await ask(`Bewerte diese mündliche Antwort. Sie wurde per Spracherkennung transkribiert: falsch erkannte Wörter können auf Aussprachefehler hinweisen; fehlende Satzzeichen ignorieren. ${profileLine()}
+Aufgabe: ${t.aufgabe}
+Transkript: ${text.slice(0,4000)}
+Antworte NUR mit JSON: {"cefr":"A2|B1|B2|C1|C2","wert":Dezimalzahl auf der Skala 1=A1 erreicht, 2=A2, 3=B1, 4=B2, 5=C1, 6=C2 (z. B. 3.5 = sicheres B1),"aufgabe":1-5,"grammatik":1-5,"wortschatz":1-5,"zusammenhang":1-5,"korrigiert":"die Antwort korrigiert und natürlich formuliert, nah am Original","musterantwort":"eine starke Musterantwort auf seinem Zielniveau, 5–7 Sätze","fehler":[{"falsch":"…","richtig":"…","satz":"ganzer korrigierter Satz","englisch":"englische Übersetzung","kategorie":"${CAT_KEYS.join("|")}","erklaerung":"Regel, max. 15 Wörter"}],"aussprache":"Wörter, die vermutlich falsch erkannt wurden, mit Aussprachetipp; leer wenn keine","tipps":["2–3 konkrete Tipps"]}
+Höchstens 10 Fehler, wichtigste zuerst.`);
+      if (!r || !r.korrigiert) throw { code: "invalid_json" };
+      const errs = mapErrors(r.fehler); adaptProduce("s", r, errs);
+      res.replaceChildren(
+        h("div",{class:"sec-h",style:"margin-top:14px"}, h("h2",null,"Bewertung"), h("span",{class:"meta"}, "ca. " + str(r.cefr,3))),
+        critRow(r, [["aufgabe","Aufgabe"],["grammatik","Grammatik"],["wortschatz","Wortschatz"],["zusammenhang","Zusammenhang"]]),
+        h("div",{class:"box",style:"margin-top:10px"}, h("div",{class:"qn"},"Deine Antwort, korrigiert"), say(str(r.korrigiert,4000))),
+        h("div",{class:"box"}, h("div",{class:"qn"},"Musterantwort – anhören und nachsprechen"), say(str(r.musterantwort,4000))),
+        r.aussprache ? h("div",{class:"box"}, h("div",{class:"qn"},"Aussprache"), h("div",null, str(r.aussprache,600))) : null,
+        Array.isArray(r.tipps) && r.tipps.length ? h("div",{class:"box"}, h("div",{class:"qn"},"Tipps"), ...r.tipps.slice(0,3).map(x => h("div",null,"• " + str(x,300)))) : null,
+        h("div",{class:"sec-h",style:"margin-top:14px"}, h("h2",null,"Fehler"), h("span",{class:"meta"}, errs.length + " gefunden")),
+        errorList(errs, "Sprechen"));
+    } catch(e){ res.replaceChildren(h("div",{class:"err"}, sampleErr(e))); }
+    finally { go.disabled = false; }
+  });
+  $("spHost").replaceChildren(h("div",{class:"box anim",style:"margin-top:12px"},
+    h("div",{class:"qn"}, (t.typ || "Sprechaufgabe") + (t.lvl ? " · Stufe " + lvlLabel(t.lvl) : "")), say(t.aufgabe), enLine(t.en),
+    t.redemittel.length ? h("div",null, h("div",{class:"qn",style:"margin-bottom:6px"},"Nützliche Wendungen"), ...t.redemittel.map(r => say(r))) : null,
+    ta, h("div",{class:"row"}, micBtn(ta), go, cnt), res));
+}
+/* LCS alignment of words: marks target words that were not recognised */
+function alignWords(target, said){
+  const T = String(target).split(/\s+/).filter(Boolean), tn = T.map(w => norm(w)), sn = words(said);
+  const n = tn.length, m = sn.length, dp = Array.from({length:n+1}, () => new Array(m+1).fill(0));
+  for (let i=n-1;i>=0;i--) for (let j=m-1;j>=0;j--) dp[i][j] = tn[i] && tn[i] === sn[j] ? dp[i+1][j+1] + 1 : Math.max(dp[i+1][j], dp[i][j+1]);
+  const hit = new Array(n).fill(false); let i = 0, j = 0;
+  while (i < n && j < m){ if (tn[i] && tn[i] === sn[j]){ hit[i] = true; i++; j++; } else if (dp[i+1][j] >= dp[i][j+1]) i++; else j++; }
+  const real = tn.filter(Boolean).length || 1; const ok = hit.filter((x,k)=>x && tn[k]).length;
+  return { T, hit, pct: Math.round(100*ok/real) };
+}
+function sentencePool(){
+  return shuffle(state.items.map(it => it.satz || (/\s/.test(it.back) && /[.?!]$/.test(it.back.trim()) ? it.back : "")).filter(s => s && words(s).length >= 4 && words(s).length <= 22));
+}
+function runDrill(hostId, mode){
+  const pool = sentencePool().slice(0,5);
+  const host = $(hostId);
+  if (pool.length < 3){ host.replaceChildren(h("div",{class:"empty"},"Zu wenige ganze Sätze in deinen Karten. Mach zuerst eine Lektion oder KI-Übung.")); return; }
+  if (!TTS.ok && mode === "dict"){ host.replaceChildren(h("div",{class:"banner"},"Das Hördiktat braucht die Sprachausgabe. Öffne die App in Chrome."), fa("برای دیکته شنیداری، برنامه را در Chrome باز کن.")); return; }
+  let idx = 0, score = 0; const skill = mode === "dict" ? "h" : "s";
+  const step = () => {
+    if (idx >= pool.length){ host.replaceChildren(h("div",{class:"box anim",style:"margin-top:12px"}, h("div",{class:"qn"},"Ergebnis"), h("div",{style:"font:700 28px var(--f-display)"}, Math.round(score/pool.length) + " % erkannt"), h("div",{class:"muted"}, mode === "dict" ? "Hörverstehen auf Satzebene." : "Je höher, desto besser hat die Spracherkennung deine Aussprache verstanden."))); logReview(score/pool.length >= 70); return; }
+    const target = pool[idx]; const play = spk(target, "de-DE", "Satz vorlesen");
+    const ta = h(mode === "dict" ? "input" : "textarea",{type:"text","aria-label":mode === "dict" ? "Was hörst du?" : "Nachgesprochener Satz",lang:"de",autocomplete:"off",spellcheck:"false",placeholder: mode === "dict" ? "Schreib, was du hörst …" : "Mikrofon antippen und nachsprechen …", style: mode === "dict" ? "" : "min-height:80px"});
+    ta.addEventListener("input", ()=>track(skill));
+    const out = h("div"); const check = h("button",{class:"btn sm primary",type:"button"},"Vergleichen");
+    check.addEventListener("click", ()=>{
+      check.disabled = true; track(skill);
+      const a = alignWords(target, ta.value); score += a.pct; record("skill", skill, a.pct/100, { w: 0.5, moveD: false });
+      out.replaceChildren(h("div",{class:"sol"}, h("div",{class:"say"}, h("div",{class:"t"}, ...a.T.flatMap((w,k) => [k ? " " : "", h("span",{class: a.hit[k] ? "right" : "miss"}, w)])), spk(target, "de-DE")),
+        h("div",{class:"muted",style:"margin-top:4px"}, a.pct + " % " + (mode === "dict" ? "richtig gehört" : "erkannt") + (a.pct < 100 ? " · rot = " + (mode === "dict" ? "nicht gehört" : "nicht erkannt, noch einmal üben") : ""))),
+        h("div",{class:"row",style:"margin-top:8px"}, h("button",{class:"btn sm",type:"button",onclick:()=>{ idx++; step(); }}, idx + 1 < pool.length ? "Nächster Satz" : "Ergebnis")));
+    });
+    host.replaceChildren(h("div",{class:"box anim",style:"margin-top:12px"},
+      h("div",{class:"qn"}, "Satz " + (idx+1) + " / " + pool.length),
+      mode === "dict" ? h("div",{class:"row"}, play, h("span",{class:"muted"},"Anhören (beliebig oft)")) : h("div",{class:"say"}, h("div",{class:"t"}, target), play),
+      ta, h("div",{class:"row"}, mode === "dict" ? null : micBtn(ta), check), out));
+    if (mode === "dict" || TTS.auto) speak(target, "de-DE", play);
+  };
+  step();
+}
+async function genListening(){
+  const st = $("lsStatus"); if (!needAI(st)) return;
+  $("genListen").disabled = true; st.textContent = "Hörtext wird erstellt …";
+  try {
+    const lv = taskLevel("h"); const r = await ask(`Erstelle einen Hörtext für das Hörverstehen, GER-Niveau ${lvlLabel(lv)}. ${profileLine()}
+Thema aus seinen Interessen (zufällig, Zahl ${Math.floor(Math.random()*1000)}): z. B. eine Ansage im Betrieb, ein Gespräch zwischen Kollegen, ein Kurzvortrag, eine Sprachnachricht eines Kunden. 90–140 Wörter, genau auf Niveau ${lvlLabel(lv)} (Wortschatz, Satzbau, Tempo), natürliche gesprochene Sprache.
+Antworte NUR mit JSON: {"titel":"…","text":"…","text_en":"englische Übersetzung","fragen":[{"frage":"…","optionen":["…","…","…"],"richtig":0,"erklaerung":"kurz"}]} mit genau 3 Fragen; "richtig" ist der Index der richtigen Option.`);
+    if (!r || !r.text || !Array.isArray(r.fragen)) throw { code: "invalid_json" };
+    st.textContent = ""; r._d = lv; renderListening(r);
+  } catch(e){ st.textContent = sampleErr(e); }
+  finally { $("genListen").disabled = false; }
+}
+function renderListening(r){
+  const text = str(r.text, 2000); const play = spk(text, "de-DE", "Text vorlesen");
+  const txt = h("div",{hidden:true}, say(text), enLine(str(r.text_en,2000)));
+  const toggle = h("button",{class:"btn sm ghost",type:"button",onclick:()=>{ txt.hidden = !txt.hidden; toggle.textContent = txt.hidden ? "Text zeigen" : "Text verbergen"; }},"Text zeigen");
+  let answered = 0, right = 0;
+  const qs = r.fragen.slice(0,3).map((q, qi) => {
+    const opts = (Array.isArray(q.optionen) ? q.optionen : []).slice(0,4).map(o => str(o,200)); const ri = Math.max(0, Math.min(opts.length-1, Math.round(num(q.richtig,0))));
+    const expl = h("div",{class:"muted",hidden:true,style:"font-size:14px"}, str(q.erklaerung,300));
+    const btns = opts.map((o, oi) => { const b = h("button",{class:"opt",type:"button"}, o); b.addEventListener("click", ()=>{
+      track("h"); btns.forEach(x => x.disabled = true); b.classList.add(oi === ri ? "sel-ok" : "sel-bad"); if (oi !== ri) btns[ri].classList.add("sel-ok"); expl.hidden = false;
+      answered++; if (oi === ri) right++; logReview(oi === ri); record("skill", "h", oi === ri ? 1 : 0, { d: r._d }); if (answered === qs.length) toast(right + " von " + qs.length + " richtig"); }); return b; });
+    return h("div",{class:"box"}, h("div",{class:"qn"}, "Frage " + (qi+1)), h("div",{style:"font-weight:500"}, str(q.frage,300)), h("div",{class:"opts"}, ...btns), expl);
+  });
+  $("lsHost").replaceChildren(h("div",{class:"box anim",style:"margin-top:12px"}, h("div",{class:"qn"}, (str(r.titel,120) || "Hörtext") + (r._d ? " · Stufe " + lvlLabel(r._d) : "")), h("div",{class:"row"}, play, h("span",{class:"muted"},"Zweimal anhören, dann antworten."), toggle), txt), ...qs);
+  track("h"); speak(text, "de-DE", play);
+}
+
+/* ================= Writing ================= */
+async function genWriting(){
+  const st = $("wrStatus"); if (!needAI(st)) return;
+  $("genWrite").disabled = true; st.textContent = "Aufgabe wird erstellt …";
+  try {
+    const lv = taskLevel("sc"); const t = await ask(`Erstelle EINE Schreibaufgabe aus dem Berufsalltag, GER-Niveau ${lvlLabel(lv)} (Aufgabe und erwartete Textqualität genau auf diesem Niveau). ${profileLine()}
+Typen (zufällig, Zahl ${Math.floor(Math.random()*1000)}): E-Mail an Kollegen, E-Mail an Kunden/Lieferanten, kurzer Versuchsbericht, Absatz für ein Anschreiben, Antwort an einen Recruiter, Protokollnotiz.
+Antworte NUR mit JSON: {"typ":"…","aufgabe":"Situation und Auftrag auf Deutsch","aufgabe_en":"englische Übersetzung","punkte":["3–4 Inhaltspunkte, die vorkommen müssen"],"woerter":"z. B. 80–120"}`);
+    if (!t || !t.aufgabe) throw { code: "invalid_json" };
+    st.textContent = "";
+    const task = { lvl: lv, typ:str(t.typ,60), aufgabe:str(t.aufgabe,800), en:str(t.aufgabe_en,800), punkte:(Array.isArray(t.punkte)?t.punkte:[]).slice(0,5).map(x=>str(x,200)), woerter:str(t.woerter,20) };
+    state.writeTask = task;
+    $("wrTask").replaceChildren(h("div",{class:"box anim",style:"margin-top:12px"}, h("div",{class:"qn"}, task.typ + " · Stufe " + lvlLabel(task.lvl) + (task.woerter ? " · " + task.woerter + " Wörter" : "")), say(task.aufgabe), enLine(task.en), task.punkte.length ? h("div",null, ...task.punkte.map(x => h("div",null,"• " + x))) : null,
+      h("div",{class:"muted",style:"font-size:13px"},"Schreib deinen Text unten in „Text prüfen“.")));
+    $("checkText").focus();
+  } catch(e){ st.textContent = sampleErr(e); }
+  finally { $("genWrite").disabled = false; }
+}
+let checkCtl = null;
+async function runCheck(){
+  const text = $("checkText").value.trim();
+  if (words(text).length < 10){ $("checkStatus").textContent = "Schreib mindestens 2–3 Sätze."; return; }
+  if (!needAI($("checkStatus"))) return;
+  checkCtl = new AbortController(); $("checkBtn").disabled = true; $("checkStop").hidden = false; $("checkResult").replaceChildren();
+  $("checkStatus").textContent = "Wird geprüft … (10–40 Sekunden)"; track("sc");
+  const task = state.writeTask;
+  try {
+    const res = await ask(`Du bist ein strenger, präziser Deutschlehrer und Prüfer (GER). ${profileLine()}
+${task ? "Aufgabe: " + task.aufgabe + (task.punkte.length ? " Inhaltspunkte: " + task.punkte.join("; ") : "") : "Freier Text, keine Aufgabe."}
+Prüfe seinen Text. Finde JEDEN Grammatik-, Wortstellungs-, Artikel-, Endungs-, Präpositions-, Rechtschreib- und Ausdrucksfehler; unnatürliche oder unprofessionelle Formulierungen zählen als Fehler (Kategorie "redemittel").
+Antworte NUR mit JSON: {"cefr":"A2|B1|B2|C1|C2","wert":Dezimalzahl 1=A1 erreicht … 6=C2,"aufgabe":1-5,"grammatik":1-5,"wortschatz":1-5,"zusammenhang":1-5,"korrigiert":"vollständig korrigierter, natürlicher Text","korrigiert_en":"englische Übersetzung","fehler":[{"falsch":"Ausschnitt wie im Original","richtig":"korrigiert","satz":"ganzer korrigierter Satz","englisch":"englische Übersetzung des Satzes","kategorie":"${CAT_KEYS.join("|")}","erklaerung":"Regel, max. 15 Wörter"}],"tipp":"ein konkreter Tipp, max. 25 Wörter"}
+Höchstens 15 Fehler, wichtigste zuerst.
+
+TEXT:
+${text.slice(0,6000)}`, { signal: checkCtl.signal });
+    if (!res || !res.korrigiert) throw { code: "invalid_json" };
+    const errs = mapErrors(res.fehler); adaptProduce("sc", res, errs);
+    const corr = str(res.korrigiert, 8000);
+    $("checkResult").replaceChildren(
+      h("section",null, h("div",{class:"sec-h"}, h("h2",null,"Bewertung"), h("span",{class:"meta"}, "Niveau ca. " + str(res.cefr,3))),
+        critRow(res, [["aufgabe","Aufgabe"],["grammatik","Grammatik"],["wortschatz","Wortschatz"],["zusammenhang","Zusammenhang"]])),
+      h("section",null, h("div",{class:"sec-h"}, h("h2",null,"Korrigierter Text")), h("div",{class:"say"}, h("div",{class:"t corrected"}, corr), spk(corr, "de-DE", "Korrigierten Text vorlesen")), enLine(str(res.korrigiert_en,8000))),
+      h("section",null, h("div",{class:"sec-h"}, h("h2",null,"Fehler"), h("span",{class:"meta"}, errs.length + " gefunden")), errorList(errs, "Schreiben")),
+      res.tipp ? h("section",null, h("div",{class:"sec-h"}, h("h2",null,"Tipp")), h("p",{class:"lead",style:"color:var(--ink)"}, str(res.tipp,400))) : null);
+    $("checkStatus").textContent = "";
+  } catch(e){ $("checkStatus").textContent = sampleErr(e); }
+  finally { $("checkBtn").disabled = false; $("checkStop").hidden = true; }
+}
+
+/* ================= Profile form (shared by onboarding + profile tab) ================= */
+function profileFields(p, onChange){
+  const sel = new Set(p.themen || []);
+  const beruf = h("input",{type:"text",id:"pBeruf",value:p.beruf || "",placeholder:"z. B. Teamleiter Schleiftechnik, Postdoc"});
+  const fach = h("input",{type:"text",id:"pFach",value:p.fach || "",placeholder:"z. B. Fertigungstechnik, Schleifen, FEA-Simulation"});
+  const frei = h("input",{type:"text",id:"pFrei",value:p.themenFrei || "",placeholder:"Weitere Themen, durch Komma getrennt"});
+  const ms = h("input",{type:"text",id:"pMs",value:p.muttersprache || "Persisch"});
+  const ziel = h("select",{id:"pZiel"}, ...GOALS.map(g => h("option",{value:g, selected: p.ziel === g}, g)));
+  const chips = h("div",{class:"chips"}, ...TOPICS.map(t => { const b = h("button",{type:"button",class:"pick","aria-pressed":sel.has(t)?"true":"false"}, t); b.addEventListener("click", ()=>{ if (sel.has(t)) sel.delete(t); else sel.add(t); b.setAttribute("aria-pressed", sel.has(t)?"true":"false"); onChange && onChange(); }); return b; }));
+  const segPick = (id, opts, cur) => { const wrap = h("div",{class:"seg",role:"group",id}); wrap.value = cur; opts.forEach(o => { const b = h("button",{type:"button","aria-pressed":o===cur?"true":"false"}, o); b.addEventListener("click", ()=>{ wrap.value = o; wrap.querySelectorAll("button").forEach(x => x.setAttribute("aria-pressed", x === b ? "true":"false")); onChange && onChange(); }); wrap.append(b); }); return wrap; };
+  const selbst = segPick("pSelbst", ["A2","B1","B2","C1"], p.selbst || "B1");
+  const zielN = segPick("pZielN", ["B1","B2","C1","C2"], p.zielNiveau || "B2");
+  const defDate = new Date(Date.now() + 270*DAY); const dd = defDate.getFullYear()+"-"+String(defDate.getMonth()+1).padStart(2,"0")+"-"+String(defDate.getDate()).padStart(2,"0");
+  const datum = h("input",{type:"date",id:"pDatum",value:p.zielDatum || dd,min:dayKey()});
+  const minuten = h("select",{id:"pMin"}, ...[15,20,30,45,60,75,90,120,150].map(m => h("option",{value:String(m), selected: num(p.minuten,45) === m}, m + " Min")));
+  const arbeit = h("input",{type:"number",id:"pArbeit",min:"0",max:"60",step:"1",value:String(num(p.arbeitStd,0))});
+  [beruf,fach,frei,ms,ziel,datum,minuten,arbeit].forEach(el => el.addEventListener("input", ()=>onChange && onChange()));
+  const read = () => ({ ...p, beruf: beruf.value.trim(), fach: fach.value.trim(), themen: [...sel], themenFrei: frei.value.trim(), muttersprache: ms.value.trim() || "Persisch", ziel: ziel.value,
+    selbst: selbst.value, zielNiveau: zielN.value, zielDatum: datum.value, minuten: num(minuten.value,45), arbeitStd: Math.max(0, num(arbeit.value,0)) });
+  const partA = h("div",{class:"form"},
+    h("div",{class:"grid2"}, h("label",{class:"f",for:"pBeruf"},"Beruf / Position", beruf), h("label",{class:"f",for:"pFach"},"Fachgebiet", fach)),
+    h("div",{class:"fl"}, "Interessen & Fachthemen", chips, frei),
+    h("div",{class:"grid2"}, h("label",{class:"f",for:"pZiel"},"Wofür lernst du?", ziel), h("label",{class:"f",for:"pMs"},"Muttersprache", ms)));
+  const partB = h("div",{class:"form"},
+    h("div",{class:"fl"}, "Dein Niveau (Selbsteinschätzung)", selbst),
+    h("div",{class:"fl"}, "Zielniveau", zielN),
+    h("div",{class:"grid2"}, h("label",{class:"f",for:"pDatum"},"Bis wann?", datum), h("label",{class:"f",for:"pMin"},"Lernzeit pro Tag", minuten)),
+    h("label",{class:"f",for:"pArbeit"},"Deutsch bei der Arbeit / im Alltag", h("span",{class:"h"},"Stunden pro Woche, in denen du wirklich Deutsch sprichst oder liest. 20 % davon zählen als Lernzeit."), arbeit));
+  return { partA, partB, read };
+}
+
+/* ================= Onboarding & placement test ================= */
+/* The test is autosaved after every answer (server + this device), so a reload, an app update
+   or a closed tab resumes at the same question. */
+const DR = { timer: null, w: Promise.resolve() };
+function serialOnb(){
+  if (!onb) return null;
+  const p = onb.fields && onb.step <= 1 ? onb.fields.read() : onb.p;
+  return JSON.parse(JSON.stringify({ step: onb.step, p, exam: onb.exam, writing: onb.writing, speaking: onb.speaking, examDone: !!onb.examDone, texts: onb.texts || {}, t: Date.now() }));
+}
+function saveDraftSoon(){ if (DR.timer) clearTimeout(DR.timer); DR.timer = setTimeout(saveDraftNow, 700); }
+function saveDraftNow(){
+  if (DR.timer){ clearTimeout(DR.timer); DR.timer = null; }
+  const d = serialOnb(); if (!d) return;
+  try { localStorage.setItem("fd.draft", JSON.stringify(d)); } catch(e){}
+  if (state.db) DR.w = DR.w.then(() => dbw(state.db.doc(base() + "/draft").set(d))).catch(()=>{});
+}
+function clearDraft(){
+  if (DR.timer){ clearTimeout(DR.timer); DR.timer = null; }
+  try { localStorage.removeItem("fd.draft"); } catch(e){}
+  state.draft = null;
+  if (state.db) DR.w = DR.w.then(() => dbw(state.db.doc(base() + "/draft").delete())).catch(()=>{});
+}
+function resumeOnboarding(d){
+  onb = { step: d.step || 0, p: d.p || {}, fields: null, exam: d.exam || null, writing: d.writing || null, speaking: d.speaking || null, examDone: !!d.examDone, texts: d.texts || {} };
+  if (onb.step === 2 && !onb.exam) onb.step = 1;
+  document.querySelectorAll("[data-panel]").forEach(x => x.hidden = true);
+  $("tabs").hidden = true; $("onb").hidden = false;
+  renderOnb(); toast("Test wird fortgesetzt – nichts verloren");
+}
+let onb = null;
+function startOnboarding(fromStep){
+  const p = state.profile ? { ...state.profile } : {};
+  onb = { step: fromStep || 0, p, fields: null, exam: null, writing: null, speaking: null, texts: {} };
+  document.querySelectorAll("[data-panel]").forEach(x => x.hidden = true);
+  $("tabs").hidden = true; $("onb").hidden = false;
+  renderOnb();
+}
+const ONB_STEPS = ["Profil","Ziel & Zeit","Test","Schreiben","Sprechen","Plan"];
+function onbFrame(title, faText, ...body){
+  return h("div",null,
+    h("div",{class:"wiz-steps","aria-hidden":"true"}, ...ONB_STEPS.map((_,i) => h("i",{class: i <= onb.step ? "on" : ""}))),
+    h("section",null, h("div",{class:"sec-h"}, h("h2",null, title), h("span",{class:"meta"}, "Schritt " + (onb.step+1) + " / " + ONB_STEPS.length)),
+      faText ? h("p",{class:"fa-hint",dir:"rtl",lang:"fa"}, faText) : null, ...body,
+      h("p",{class:"tol-legend",style:"margin-top:16px"}, "Jede Antwort wird sofort gespeichert. Wenn die Seite neu lädt, geht es an derselben Stelle weiter."),
+      state.profile && state.profile.exam ? h("div",{class:"row",style:"margin-top:8px"}, h("button",{class:"btn sm ghost",type:"button",onclick:()=>{ clearDraft(); finishOnboarding(); }},"Test abbrechen")) : null));
+}
+function renderOnb(){
+  const host = $("onb"); window.scrollTo({top:0});
+  if (onb.step <= 1 && !onb.fields) onb.fields = profileFields(onb.p, saveDraftSoon);
+  saveDraftSoon();
+  if (onb.step === 0){
+    const next = h("button",{class:"btn primary",type:"button"},"Weiter");
+    next.addEventListener("click", ()=>{ onb.p = onb.fields.read(); onb.step = 1; renderOnb(); });
+    host.replaceChildren(onbFrame("Willkommen", "اطلاعات شغلی و موضوعات مورد علاقه‌ات را وارد کن تا تمرین‌ها دقیقاً مربوط به حوزه کاری تو باشند.",
+      h("p",{class:"lead"},"Der Trainer baut alle Übungen aus deinem Beruf und deinen Themen. Danach legst du Ziel und Zeit fest und machst einen kurzen Einstufungstest (ca. 15 Minuten)."),
+      window.FD_STANDALONE ? (() => { const file = h("input",{type:"file",accept:"application/json,.json",hidden:true}); const st = h("div",{class:"muted",style:"font-size:13px"}); file.addEventListener("change", () => importBackup(file, st));
+        return h("div",{class:"help",style:"margin-bottom:14px"}, h("div",null, h("b",null,"Schon Daten? "), "Spiel deine Sicherung ein – Profil, Test, Karten und Stufen werden übernommen."), h("div",{class:"fa-hint",style:"margin:4px 0 8px"},"اگر فایل پشتیبان داری، اینجا واردش کن تا همه‌چیز منتقل شود."), h("div",{class:"row"}, h("button",{class:"btn",type:"button",onclick:()=>file.click()},"Sicherung einspielen"), file), st); })() : null,
+      onb.fields.partA, h("div",{class:"row",style:"margin-top:16px"}, next)));
+  } else if (onb.step === 1){
+    const back = h("button",{class:"btn ghost",type:"button",onclick:()=>{ onb.p = onb.fields.read(); onb.step = 0; renderOnb(); }},"Zurück");
+    const next = h("button",{class:"btn primary",type:"button"},"Weiter zum Test");
+    next.addEventListener("click", ()=>{ onb.p = onb.fields.read(); if (!onb.p.zielDatum){ toast("Bitte ein Zieldatum wählen."); return; }
+      if (onb.examDone){ onb.step = 5; renderOnb(); return; }
+      onb.step = 2; onb.exam = { order: shuffle(EXAM.map((_,i)=>i)).sort((a,b)=>"A2B1B2C1".indexOf(EXAM[a].l) - "A2B1B2C1".indexOf(EXAM[b].l)), i: 0, answers: {} }; renderOnb(); });
+    host.replaceChildren(onbFrame("Ziel & Zeit", "سطح فعلی، سطح هدف، تاریخ رسیدن به آن و زمانی که هر روز می‌توانی بگذاری را مشخص کن.", onb.fields.partB, h("div",{class:"row",style:"margin-top:16px"}, back, next)));
+  } else if (onb.step === 2){
+    const ex = onb.exam; const qi = ex.order[ex.i]; const q = EXAM[qi];
+    if (!ex.shuf || ex.shufFor !== qi){ ex.shuf = shuffle(q.o.map((o,k)=>k)); ex.shufFor = qi; }
+    const pick = k => { ex.answers[qi] = k; trk.last = Date.now(); saveDraftNow(); if (ex.i < ex.order.length - 1){ ex.i++; renderOnb(); } else { onb.step = 3; renderOnb(); } };
+    host.replaceChildren(onbFrame("Einstufungstest", "۲۴ سؤال از آسان به سخت. اگر جواب را نمی‌دانی «Weiß ich nicht» را بزن؛ حدس زدن نتیجه را غیرواقعی می‌کند.",
+      h("div",{class:"progress"}, h("i",{style:"width:" + Math.round(100*ex.i/ex.order.length) + "%"})),
+      h("div",{class:"card"}, h("div",{class:"strip"}, h("span",null,"Frage " + (ex.i+1) + " / " + ex.order.length), h("span",null, q.k === "w" ? "Wortschatz" : "Grammatik")),
+        h("div",{class:"front"}, q.q),
+        h("div",{class:"opts",style:"padding:0 12px 12px"}, ...ex.shuf.map(k => h("button",{class:"opt",type:"button",onclick:()=>pick(k)}, q.o[k])), h("button",{class:"opt idk",type:"button",onclick:()=>pick(-1)},"Weiß ich nicht"))),
+      ex.i > 0 ? h("div",{class:"row",style:"margin-top:10px"}, h("button",{class:"btn sm ghost",type:"button",onclick:()=>{ ex.i--; renderOnb(); }},"Vorherige Frage")) : null));
+  } else if (onb.step === 3){
+    renderOnbProduce("w");
+  } else if (onb.step === 4){
+    renderOnbProduce("s");
+  } else {
+    renderOnbResult();
+  }
+}
+function scoreExam(){
+  const ex = onb.exam; const byL = {}; const byK = { g:[0,0], w:[0,0] };
+  for (const l of ["A2","B1","B2","C1"]) byL[l] = { r:0, w:0, n:0 };
+  EXAM.forEach((q,i) => { const a = ex.answers[i]; const L = byL[q.l]; L.n++; byK[q.k][1]++; if (a === 0){ L.r++; byK[q.k][0]++; } else if (a != null && a >= 0) L.w++; });
+  let v = 1; const lv = {};
+  for (const l of ["A2","B1","B2","C1"]){ const L = byL[l]; const adj = Math.max(0, Math.min(1, (L.r - L.w/3) / L.n)); lv[l] = Math.round(L.r/L.n*100); v += adj; }
+  return { mcV: Math.round(v*100)/100, byLevel: lv, g: byK.g[1] ? byK.g[0]/byK.g[1] : null, w: byK.w[1] ? byK.w[0]/byK.w[1] : null };
+}
+function renderOnbProduce(kind){
+  const isW = kind === "w"; const host = $("onb");
+  const p = onb.p;
+  const task = isW
+    ? "Stellen Sie sich in 80–150 Wörtern schriftlich vor: Ihre Ausbildung, Ihre aktuelle Arbeit" + (p.fach ? " im Bereich " + p.fach : "") + " und Ihr berufliches Ziel in Deutschland."
+    : "Erklären Sie mündlich (1–2 Minuten) einen typischen Ablauf aus Ihrer Arbeit" + (p.fach ? " (" + p.fach + ")" : "") + ", zum Beispiel wie ein Versuch oder ein Projekt abläuft, und welche Probleme dabei auftreten können.";
+  const ta = h("textarea",{lang:"de","aria-label": isW ? "Dein Text" : "Deine gesprochene Antwort", placeholder: isW ? "Schreib hier …" : "Mikrofon der Tastatur antippen und sprechen …"});
+  onb.texts = onb.texts || {}; ta.value = onb.texts[kind] || "";
+  const cnt = h("span",{class:"muted"}, words(ta.value).length + " Wörter");
+  ta.addEventListener("input", ()=>{ track(isW ? "sc" : "s"); cnt.textContent = words(ta.value).length + " Wörter"; onb.texts[kind] = ta.value; saveDraftSoon(); });
+  const status = h("div",{class:"muted"});
+  const go = h("button",{class:"btn primary",type:"button"},"Abgeben");
+  const skip = h("button",{class:"btn ghost",type:"button"},"Überspringen");
+  skip.addEventListener("click", ()=>{ onb[isW ? "writing" : "speaking"] = null; onb.step++; renderOnb(); });
+  go.addEventListener("click", async ()=>{
+    const text = ta.value.trim(); if (words(text).length < (isW ? 30 : 25)){ status.textContent = isW ? "Bitte mindestens 30 Wörter." : "Bitte mindestens 25 Wörter sprechen."; return; }
+    if (!state.sample || (window.FD_STANDALONE && !hasKey())){ status.textContent = window.FD_STANDALONE ? "Die Bewertung braucht deinen API-Schlüssel (Profil → KI-Schlüssel). Überspringe diesen Teil und mach ihn später unter „Schreiben“ bzw. „Hören & Sprechen“." : "Die Bewertung braucht die KI. Überspringe diesen Teil oder öffne die App über Claude."; return; }
+    go.disabled = true; skip.disabled = true; status.textContent = "Wird bewertet … (10–40 Sekunden)";
+    try {
+      const r = await ask(`Bewerte diese ${isW ? "schriftliche" : "mündliche (per Spracherkennung transkribierte; Satzzeichen ignorieren, falsch erkannte Wörter können Aussprachefehler sein)"} Leistung für eine Einstufung nach GER. Sei streng und realistisch, wie ein telc/Goethe-Prüfer. ${profileLine()}
+Aufgabe: ${task}
+Antwort: ${text.slice(0,4000)}
+Antworte NUR mit JSON: {"cefr":"A1|A2|B1|B2|C1|C2","wert":Dezimalzahl 1=A1 erreicht, 2=A2, 3=B1, 4=B2, 5=C1, 6=C2 (z. B. 3.5 = sicheres B1),"aufgabe":1-5,"grammatik":1-5,"wortschatz":1-5,"zusammenhang":1-5,"staerken":"1 Satz","schwaechen":"1–2 Sätze","fehler":[{"falsch":"…","richtig":"…","satz":"ganzer korrigierter Satz","englisch":"englische Übersetzung","kategorie":"${CAT_KEYS.join("|")}","erklaerung":"Regel, max. 15 Wörter"}]}
+Höchstens 8 Fehler, die typischsten zuerst.`);
+      const wv = num(r && r.wert, NaN); if (!isFinite(wv)) throw { code: "invalid_json" };
+      onb[isW ? "writing" : "speaking"] = { v: Math.max(1, Math.min(6, wv)), cefr: str(r.cefr,3), crit: { aufgabe:r.aufgabe, grammatik:r.grammatik, wortschatz:r.wortschatz, zusammenhang:r.zusammenhang }, staerken: str(r.staerken,300), schwaechen: str(r.schwaechen,400), errs: mapErrors(r.fehler) };
+      onb.step++; renderOnb();
+    } catch(e){ status.textContent = sampleErr(e); go.disabled = false; skip.disabled = false; }
+  });
+  host.replaceChildren(onbFrame(isW ? "Schreiben" : "Sprechen",
+    isW ? "یک متن کوتاه بنویس. هوش مصنوعی سطح نوشتاری‌ات را مثل ممتحن telc ارزیابی می‌کند." : "روی کادر متن بزن، بعد روی میکروفون کیبورد (Gboard) و آلمانی صحبت کن. متن خودکار نوشته می‌شود و سطح گفتاری‌ات ارزیابی می‌شود.",
+    h("div",{class:"box"}, h("div",{class:"qn"}, isW ? "Schreibaufgabe" : "Sprechaufgabe"), say(task)),
+    isW ? null : h("div",{class:"help",style:"margin-top:10px"},"Tippe ins Feld, dann aufs Mikrofon der Tastatur. Sprich in ganzen Sätzen; Korrekturen am Text sind nicht nötig."),
+    h("div",{style:"margin-top:10px"}, ta), h("div",{class:"row",style:"margin-top:8px"}, isW ? null : micBtn(ta), go, skip, cnt), status));
+}
+function renderOnbResult(){
+  const host = $("onb"); const sc = scoreExam(); const p = onb.p; onb.examDone = true;
+  const parts = [[sc.mcV, 0.5]]; if (onb.writing) parts.push([onb.writing.v, 0.25]); if (onb.speaking) parts.push([onb.speaking.v, 0.25]);
+  const wsum = parts.reduce((a,x)=>a+x[1],0); const v = Math.round(parts.reduce((a,x)=>a+x[0]*x[1],0)/wsum*100)/100;
+  const rel = x => x == null ? null : Math.max(0.05, Math.min(0.95, 0.5 + (x - sc.mcV) / 2));
+  const skills = { g: sc.g, w: sc.w, sc: onb.writing ? rel(onb.writing.v) : null, s: onb.speaking ? rel(onb.speaking.v) : null, h: null };
+  const exam = { date: Date.now(), v, mcV: sc.mcV, wV: onb.writing ? onb.writing.v : null, sV: onb.speaking ? onb.speaking.v : null, byLevel: sc.byLevel, skills };
+  const prof = { ...p, exam, history: (p.history || []).concat([{ date: exam.date, v, mcV: sc.mcV, wV: exam.wV, sV: exam.sV }]).slice(-20), created: p.created || Date.now() };
+  delete prof.prefill;
+  const pl = computePlan(prof, v);
+  const alloc = allocation(prof);
+  const save = h("button",{class:"btn primary",type:"button"},"Plan übernehmen und starten");
+  save.addEventListener("click", async ()=>{
+    save.disabled = true;
+    try {
+      await saveProfile(prof); initAdapt(prof); clearDraft();
+      const errs = [].concat(onb.writing ? onb.writing.errs : [], onb.speaking ? onb.speaking.errs : []);
+      for (const f of errs){ try { await addItem({ front:f.front, back:f.back, satz:f.satz, en:f.en, note:f.note, category:f.category, kind:"fehler", source:"Einstufung" }); } catch(e){ break; } }
+      finishOnboarding(); toast("Plan gespeichert" + (errs.length ? " · " + errs.length + " Fehler als Karten" : ""));
+    } catch(e){ save.disabled = false; toast("Speichern fehlgeschlagen. Prüfe die Verbindung."); }
+  });
+  const minBtn = pl.status !== "ok" && pl.status !== "erreicht" && pl.req <= 240 ? h("button",{class:"btn",type:"button",onclick:()=>{ onb.p.minuten = Math.min(150, Math.max(15, pl.req)); onb.fields = null; renderOnbResult(); toast("Lernzeit auf " + onb.p.minuten + " Min/Tag gesetzt"); }}, pl.req + " Min/Tag übernehmen") : null;
+  const lvRow = (l, pct) => { const cls = pct < 50 ? "b" : pct < 67 ? "w" : ""; return h("div",{class:"tol-row",style:"cursor:default"}, h("div",{class:"tol-name"}, "Fragen " + l), h("div",{class:"bar"}, h("i",{class:cls,style:"width:" + pct + "%"})), h("div",{class:"tol-val"}, pct + " %")); };
+  host.replaceChildren(onbFrame("Ergebnis & Plan", "نتیجه آزمون، تخمین ساعت لازم و حداقل زمان روزانه برای رسیدن به هدف در تاریخ تعیین‌شده.",
+    h("div",{class:"kpis"},
+      h("div",{class:"kpi"}, h("div",{class:"l"},"Gesamtniveau"), h("div",{class:"v"}, lvlLabel(v)), h("div",{class:"muted",style:"font-size:12px"},"Wert " + fmtV(v))),
+      h("div",{class:"kpi"}, h("div",{class:"l"},"Testfragen"), h("div",{class:"v"}, lvlLabel(sc.mcV))),
+      h("div",{class:"kpi"}, h("div",{class:"l"},"Schreiben"), h("div",{class:"v"}, onb.writing ? lvlLabel(onb.writing.v) : "–")),
+      h("div",{class:"kpi"}, h("div",{class:"l"},"Sprechen"), h("div",{class:"v"}, onb.speaking ? lvlLabel(onb.speaking.v) : "–"))),
+    h("div",{class:"tol",style:"margin-top:12px"}, ...["A2","B1","B2","C1"].map(l => lvRow(l, sc.byLevel[l]))),
+    onb.writing ? h("div",{class:"box",style:"margin-top:12px"}, h("div",{class:"qn"},"Schreiben"), h("div",null, onb.writing.staerken), h("div",{class:"muted"}, onb.writing.schwaechen)) : null,
+    onb.speaking ? h("div",{class:"box"}, h("div",{class:"qn"},"Sprechen"), h("div",null, onb.speaking.staerken), h("div",{class:"muted"}, onb.speaking.schwaechen)) : null,
+    h("div",{class:"sec-h",style:"margin-top:20px"}, h("h2",null,"Dein Plan"), h("span",{class:"meta"}, lvlLabel(v) + " → " + p.zielNiveau)),
+    verdictBox(pl, prof, false),
+    minBtn ? h("div",{class:"row",style:"margin-top:10px"}, minBtn) : null,
+    h("div",{class:"plan",style:"margin-top:12px"}, ...SK_KEYS.map(k => h("div",{class:"pl"}, h("div",null, h("div",{class:"nm"}, h("i",{style:"background:"+SK_COLOR[k]}), SKILLS[k]), h("div",{class:"mn"}, SK_DESC[k])), h("div",{class:"mn",style:"font-size:14px;color:var(--ink)"}, alloc[k] + " Min")))),
+    h("p",{class:"tol-legend"},"Schätzung auf Basis der Lernstunden-Richtwerte des Goethe-Instituts und von Cambridge, für Selbstlerner angepasst. Unsicherheit ±25–30 %. Der Test hat 24 Fragen – mach ihn alle 4–6 Wochen neu."),
+    h("div",{class:"row",style:"margin-top:16px"}, save, h("button",{class:"btn ghost",type:"button",onclick:()=>{ onb.step = 1; onb.fields = profileFields(onb.p); renderOnb(); }},"Ziel ändern"))));
+}
+function finishOnboarding(){ if (DR.timer){ clearTimeout(DR.timer); DR.timer = null; } onb = null; $("onb").hidden = true; $("onb").replaceChildren(); $("tabs").hidden = false; showView("heute"); }
+
+/* ================= Profile tab ================= */
+function renderProfile(){
+  const p = state.profile || {};
+  const f = profileFields(p, ()=>{ const draft = f.read(); preview.replaceChildren(verdictBox(computePlan(draft), draft, false)); });
+  const preview = h("div",{style:"margin-top:12px"}, p.zielNiveau ? verdictBox(computePlan(p), p, false) : null);
+  const save = h("button",{class:"btn primary",type:"button"},"Speichern & Plan neu berechnen");
+  save.addEventListener("click", async ()=>{ save.disabled = true; try { await saveProfile(f.read()); toast("Gespeichert"); renderHome(); } catch(e){ toast("Speichern fehlgeschlagen"); } finally { save.disabled = false; } });
+  $("profForm").replaceChildren(f.partA, h("div",{style:"height:16px"}), f.partB, preview, h("div",{class:"row",style:"margin-top:12px"}, save));
+  const hist = (p.history || []).slice().reverse();
+  $("examMeta").textContent = p.exam ? "zuletzt " + fmtDate(p.exam.date) : "noch kein Test";
+  $("examHist").replaceChildren(hist.length ? h("div",{class:"list"}, ...hist.map(x => h("div",{class:"li"}, h("div",{class:"a"}, h("div",{class:"q"}, fmtDate(x.date) + " · " + lvlLabel(x.v) + " (" + fmtV(x.v) + ")"), h("div",{class:"r"}, "Fragen " + lvlLabel(x.mcV) + (x.wV ? " · Schreiben " + lvlLabel(x.wV) : "") + (x.sV ? " · Sprechen " + lvlLabel(x.sV) : ""))), h("div",{class:"x"})))) : h("div",{class:"empty"},"Noch kein Einstufungstest."));
+}
+
+/* ================= Standalone settings ================= */
+async function importBackup(file, st){
+  const f = file.files && file.files[0]; if (!f) return;
+  try {
+    const obj = JSON.parse(await f.text());
+    if (!obj || obj.app !== "fachdeutsch" || !obj.docs) throw new Error("format");
+    if (DR.timer){ clearTimeout(DR.timer); DR.timer = null; }
+    const n = await window.FDLocal.importAll(obj.docs);
+    try { localStorage.removeItem("fd.draft"); } catch(e){}
+    if (state.db) await state.db.doc(base() + "/draft").delete().catch(()=>{});
+    onb = null;
+    st.textContent = n + " Einträge eingespielt. Die App lädt neu …"; st.className = "ok";
+    setTimeout(() => location.reload(), 1200);
+  } catch(e){ st.textContent = "Diese Datei ist keine Fachdeutsch-Sicherung."; st.className = "err"; }
+  file.value = "";
+}
+function renderSASettings(){
+  if (!window.FD_STANDALONE) return;
+  $("saSettings").hidden = false;
+  let key = ""; let model = "claude-sonnet-5-5";
+  try { key = localStorage.getItem("fd.apikey") || ""; model = localStorage.getItem("fd.model") || model; } catch(e){}
+  const inp = h("input",{type:"password",id:"saKey",autocomplete:"off",spellcheck:"false",placeholder:"sk-ant-…",value:key});
+  const sel = h("select",{id:"saModel"}, ...[["claude-sonnet-5-5","Claude Sonnet 5.5 – empfohlen"],["claude-haiku-5-5","Claude Haiku 5.5 – günstiger, schneller"],["claude-opus-5-5","Claude Opus 5.5 – genauer, teurer"]].map(([v,l]) => h("option",{value:v,selected:v===model},l)));
+  const st = h("div",{class:"muted",style:"font-size:13px"});
+  const save = h("button",{class:"btn primary",type:"button"},"Speichern & testen");
+  save.addEventListener("click", async () => {
+    try { localStorage.setItem("fd.apikey", inp.value.trim()); localStorage.setItem("fd.model", sel.value); } catch(e){ st.textContent = "Konnte nicht speichern."; return; }
+    if (!inp.value.trim()){ st.textContent = "Schlüssel entfernt."; return; }
+    save.disabled = true; st.textContent = "Teste Verbindung …";
+    try { const r = await state.sample.json('Antworte nur mit {"ok":true}', {}); st.textContent = r && r.ok ? "Verbindung funktioniert ✓" : "Antwort erhalten, aber unerwartet."; st.className = "ok"; }
+    catch(e){ st.textContent = sampleErr(e); st.className = "err"; }
+    finally { save.disabled = false; }
+  });
+  const exp = h("button",{class:"btn",type:"button"},"Sicherung herunterladen");
+  exp.addEventListener("click", async () => {
+    flushAll(); await new Promise(r => setTimeout(r, 300));
+    const data = { app: "fachdeutsch", v: 1, created: new Date().toISOString(), docs: window.FDLocal.exportAll() };
+    const blob = new Blob([JSON.stringify(data)], { type: "application/json" });
+    const a = h("a",{href:URL.createObjectURL(blob),download:"fachdeutsch-sicherung-" + dayKey() + ".json"}); document.body.append(a); a.click(); a.remove();
+    try { localStorage.setItem("fd.lastBackup", String(Date.now())); } catch(e){}
+    toast("Sicherung gespeichert (Ordner Downloads)"); renderSASettings();
+  });
+  const file = h("input",{type:"file",accept:"application/json,.json",id:"saImport",hidden:true});
+  const imp = h("button",{class:"btn",type:"button",onclick:()=>file.click()},"Sicherung einspielen");
+  const impSt = h("div",{class:"muted",style:"font-size:13px"});
+  file.addEventListener("change", () => importBackup(file, impSt));
+  let last = 0; try { last = +localStorage.getItem("fd.lastBackup") || 0; } catch(e){}
+  const persisted = h("div",{class:"muted",style:"font-size:13px"});
+  if (navigator.storage && navigator.storage.persisted) navigator.storage.persisted().then(p => { persisted.textContent = p ? "Dauerhafter Speicher: aktiv (Android löscht die Daten nicht automatisch)." : "Dauerhafter Speicher: nicht bestätigt – installiere die App, damit Android die Daten nicht löscht."; });
+  $("saHost").replaceChildren(h("div",{class:"form"},
+    h("label",{class:"f",for:"saKey"},"Anthropic-API-Schlüssel", h("span",{class:"h"},"Erstellen unter console.anthropic.com → API Keys. Bleibt nur auf diesem Gerät und wird nur an api.anthropic.com gesendet."), inp),
+    h("label",{class:"f",for:"saModel"},"Modell", sel),
+    h("div",{class:"row"}, save), st,
+    h("div",{class:"help"}, h("div",null, h("b",null,"Sicherung: "), last ? "zuletzt " + fmtDate(last) : "noch keine", " · Deine Daten liegen nur auf diesem Handy. Lade einmal pro Woche eine Sicherung herunter."),
+      h("div",{class:"fa-hint",style:"margin:6px 0 0"}, "داده‌ها فقط روی همین گوشی هستند. هفته‌ای یک بار «Sicherung herunterladen» را بزن تا اگر گوشی عوض شد یا برنامه پاک شد، چیزی از دست نرود.")),
+    h("div",{class:"row"}, exp, imp, file), impSt, persisted));
+}
+
+/* ================= Views & wiring ================= */
+function showView(v){
+  state.view = v;
+  document.querySelectorAll("[data-panel]").forEach(p => p.hidden = p.dataset.panel !== v);
+  document.querySelectorAll(".tab").forEach(t => t.setAttribute("aria-selected", t.dataset.view === v ? "true" : "false"));
+  if (v === "training") renderRecent();
+  if (v === "fortschritt") renderProgress();
+  if (v === "profil"){ renderProfile(); renderSASettings(); }
+  if (v === "heute") renderHome();
+  renderTtsBars();
+  window.scrollTo({top:0});
+}
+document.querySelectorAll(".tab").forEach(t => t.addEventListener("click", ()=>showView(t.dataset.view)));
+$("startDue").addEventListener("click", ()=>startSession("due"));
+$("startWords").addEventListener("click", ()=>startSession("words"));
+$("startRules").addEventListener("click", ()=>startSession("rules"));
+$("startFocus").addEventListener("click", ()=>startSession("focus"));
+$("endTrain").addEventListener("click", ()=>endSession());
+$("genEx").addEventListener("click", ()=>genExercises("weak"));
+$("genCh").addEventListener("click", ()=>genExercises("strong"));
+$("stopEx").addEventListener("click", ()=>exCtl && exCtl.abort());
+$("genSpeak").addEventListener("click", genSpeaking);
+$("startShadow").addEventListener("click", ()=>runDrill("shHost","shadow"));
+$("startDict").addEventListener("click", ()=>runDrill("dcHost","dict"));
+$("genListen").addEventListener("click", genListening);
+$("genWrite").addEventListener("click", genWriting);
+$("checkBtn").addEventListener("click", runCheck);
+$("checkStop").addEventListener("click", ()=>checkCtl && checkCtl.abort());
+$("checkText").addEventListener("input", ()=>{ track("sc"); $("wcount").textContent = words($("checkText").value).length + " Wörter"; });
+$("retest").addEventListener("click", ()=>startOnboarding(1));
+$("fCat").append(...CAT_KEYS.map(k => h("option",{value:k}, catName(k))));
+$("addForm").addEventListener("submit", async ev => {
+  ev.preventDefault(); const front = $("fFront").value.trim(), back = $("fBack").value.trim(); if (!front || !back) return;
+  $("addBtn").disabled = true;
+  try { await addItem({ front, back, note:$("fNote").value.trim(), en:$("fEn").value.trim(), category:$("fCat").value, kind:"fehler" }); ["fFront","fBack","fNote","fEn"].forEach(id => $(id).value = ""); toast("Karte gespeichert"); }
+  catch(e){ toast(e && e.code === "quota_exceeded" ? "Speicher voll. Lösche alte Karten." : "Speichern fehlgeschlagen."); }
+  finally { $("addBtn").disabled = false; }
+});
+document.addEventListener("keydown", ev => {
+  const s = state.session; if (!s || $("trainArea").hidden || /INPUT|TEXTAREA|SELECT/.test(document.activeElement.tagName)) return;
+  if (!s.shown && (ev.key === " " || ev.key === "Enter")){ ev.preventDefault(); s.shown = true; renderCard(); return; }
+  if (s.shown){ const map = {"1":0,"2":3,"3":4,"4":5}; if (ev.key in map){ const it = state.items.find(x=>x.id===s.queue[0]); if (it) grade(it, map[ev.key]); } }
+});
+
+/* ================= Boot ================= */
+function localDraft(){ try { return JSON.parse(localStorage.getItem("fd.draft") || "null"); } catch(e){ return null; } }
+/* App updates keep the test, the open view and unsent texts. */
+try {
+  const hot = window.claude && window.claude.hot;
+  if (hot && hot.snapshot) hot.snapshot(() => ({ onb: serialOnb(), view: state.view, check: $("checkText").value }));
+  const hd = hot && hot.data;
+  if (hd){ if (hd.onb) state.draft = hd.onb; if (hd.check) $("checkText").value = hd.check; if (hd.view && !hd.onb && hd.view !== "heute") setTimeout(() => showView(hd.view), 0); }
+} catch(e){}
+try { const c = localStorage.getItem("fd.check"); if (c && !$("checkText").value) $("checkText").value = c; } catch(e){}
+$("checkText").addEventListener("input", () => { try { localStorage.setItem("fd.check", $("checkText").value); } catch(e){} });
+function maybeOnboard(){
+  if (!state.profileLoaded || !state.draftLoaded || onb) return;
+  const d = state.draft;
+  const hasExam = !!(state.profile && state.profile.exam);
+  const progress = d && ((d.step || 0) >= 2 || (d.exam && d.exam.answers && Object.keys(d.exam.answers).length));
+  if (d && d.t && Date.now() - d.t < 14*DAY && (!hasExam || (progress && !(state.profile.exam.date > d.t)))){ resumeOnboarding(d); return; }
+  if (d && hasExam) clearDraft();
+  if (!state.profile || !state.profile.exam) startOnboarding(0);
+}
+renderTtsBars(); renderHome();
+(async function boot(){
+  const c = window.claude;
+  const offline = msg => { $("storeBanner").hidden = false; $("storeBanner").textContent = msg; };
+  const local = () => { try { state.profile = JSON.parse(localStorage.getItem("fd.profile") || "null"); } catch(e){ state.profile = null; } state.profileLoaded = true; try { state.adapt = JSON.parse(localStorage.getItem("fd.adapt") || "null"); } catch(e){} state.adaptLoaded = true; state.draft = state.draft || localDraft(); state.draftLoaded = true; renderSave(); renderHome(); maybeOnboard(); };
+  if (!c || !c.use){ offline("Speicher nicht verbunden: Daten bleiben nur auf diesem Gerät. Öffne die App über Claude."); local(); return; }
+  c.use("sample").then(s => { state.sample = s; }).catch(()=>{});
+  const [db, user] = await Promise.all([c.use("db").catch(()=>null), c.use("user").catch(()=>null)]);
+  const uid = user ? await user.id().catch(()=>null) : null;
+  if (!db || !uid){ offline("Speicher nicht verbunden: Melde dich bei Claude an, damit dein Fortschritt gespeichert wird."); local(); return; }
+  state.db = db; state.uid = uid; renderSave();
+  db.doc(base() + "/draft").get().then(snap => {
+    const remote = snap.exists ? snap.data() : null; const loc = localDraft();
+    state.draft = state.draft || [remote, loc].filter(Boolean).sort((a,b)=>(b.t||0)-(a.t||0))[0] || null;
+    state.draftLoaded = true; maybeOnboard();
+  }).catch(() => { state.draft = state.draft || localDraft(); state.draftLoaded = true; maybeOnboard(); });
+  db.doc(base() + "/profile").onSnapshot(snap => {
+    state.profile = snap.exists ? { ...snap.data() } : null; state.profileLoaded = true;
+    if (!onb){ renderHome(); if (state.view === "profil" && !(document.activeElement && document.activeElement.closest && document.activeElement.closest("#profForm"))) renderProfile(); }
+    maybeOnboard();
+  }, () => offline("Verbindung zum Speicher verloren. Lade die Seite neu."));
+  db.collection(itemsPath()).onSnapshot(snap => { state.items = snap.docs.map(d => ({ id: d.id, ...d.data() })); renderLists(); }, () => offline("Verbindung zum Speicher verloren. Lade die Seite neu."));
+  db.doc(base() + "/adapt").onSnapshot(snap => {
+    if (!AD.timer) state.adapt = snap.exists ? JSON.parse(JSON.stringify(snap.data())) : null;
+    state.adaptLoaded = true; if (!onb) renderHome();
+  }, () => { state.adaptLoaded = true; });
+  db.doc(base() + "/stats").onSnapshot(snap => {
+    const remote = snap.exists ? (snap.data().days || {}) : {};
+    const today = dayKey(); const mine = state.days[today];
+    state.days = { ...remote };
+    if (mine && statsTimer) state.days[today] = mine; // keep unsaved local minutes
+    renderHome();
+  }, ()=>{});
+})();
+})();
+</script>
+
+<script>
+if ("serviceWorker" in navigator) window.addEventListener("load", function(){ navigator.serviceWorker.register("sw.js").catch(function(){}); });
+</script>
+</body></html>
