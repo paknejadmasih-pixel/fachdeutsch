@@ -81,7 +81,7 @@ window.FD_STANDALONE = true;
     var messages = typeof input === "string" ? [{ role: "user", content: input }] : input;
     var body = { model: getModel(), max_tokens: 4096, messages: messages };
     if (json) body.system = "Antworte ausschließlich mit gültigem JSON, ohne Markdown-Codeblock und ohne weiteren Text.";
-    return fetch("https://api.anthropic.com/v1/messages", {
+    return (window.FDNativeFetch || fetch)("https://api.anthropic.com/v1/messages", {
       method: "POST", signal: opts && opts.signal,
       headers: { "content-type": "application/json", "x-api-key": key, "anthropic-version": "2023-06-01", "anthropic-dangerous-direct-browser-access": "true" },
       body: JSON.stringify(body)
@@ -1787,6 +1787,12 @@ function renderSASettings(){
   exp.addEventListener("click", async () => {
     flushAll(); await new Promise(r => setTimeout(r, 300));
     const data = { app: "fachdeutsch", v: 1, created: new Date().toISOString(), docs: window.FDLocal.exportAll() };
+    if (window.AndroidBridge){
+      const r = window.AndroidBridge.saveFile("fachdeutsch-sicherung-" + dayKey() + ".json", JSON.stringify(data));
+      if (String(r).startsWith("ERROR")){ toast("Sicherung fehlgeschlagen: " + String(r).slice(6)); return; }
+      try { localStorage.setItem("fd.lastBackup", String(Date.now())); } catch(e){}
+      toast("Sicherung gespeichert: " + r); renderSASettings(); return;
+    }
     const blob = new Blob([JSON.stringify(data)], { type: "application/json" });
     const a = h("a",{href:URL.createObjectURL(blob),download:"fachdeutsch-sicherung-" + dayKey() + ".json"}); document.body.append(a); a.click(); a.remove();
     try { localStorage.setItem("fd.lastBackup", String(Date.now())); } catch(e){}
@@ -1798,7 +1804,8 @@ function renderSASettings(){
   file.addEventListener("change", () => importBackup(file, impSt));
   let last = 0; try { last = +localStorage.getItem("fd.lastBackup") || 0; } catch(e){}
   const persisted = h("div",{class:"muted",style:"font-size:13px"});
-  if (navigator.storage && navigator.storage.persisted) navigator.storage.persisted().then(p => { persisted.textContent = p ? "Dauerhafter Speicher: aktiv (Android löscht die Daten nicht automatisch)." : "Dauerhafter Speicher: nicht bestätigt – installiere die App, damit Android die Daten nicht löscht."; });
+  if (window.AndroidBridge) persisted.textContent = "Speicher: in der App, bleibt bis zur Deinstallation erhalten.";
+  else if (navigator.storage && navigator.storage.persisted) navigator.storage.persisted().then(p => { persisted.textContent = p ? "Dauerhafter Speicher: aktiv (Android löscht die Daten nicht automatisch)." : "Dauerhafter Speicher: nicht bestätigt – installiere die App, damit Android die Daten nicht löscht."; });
   $("saHost").replaceChildren(h("div",{class:"form"},
     h("label",{class:"f",for:"saKey"},"Anthropic-API-Schlüssel", h("span",{class:"h"},"Erstellen unter console.anthropic.com → API Keys. Bleibt nur auf diesem Gerät und wird nur an api.anthropic.com gesendet."), inp),
     h("label",{class:"f",for:"saModel"},"Modell", sel),

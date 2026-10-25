@@ -10,3 +10,10 @@ adaptive Übungen (Wortschatz, Grammatik, Hören, Sprechen mit Mikrofon, Schreib
 Dieses Repository enthält keine persönlichen Daten.
 
 Adresse: https://paknejadmasih-pixel.github.io/fachdeutsch/
+
+## Android-App (APK)
+Jede Änderung auf `main` baut automatisch eine APK (GitHub Actions) und veröffentlicht sie unter **Releases**:
+https://github.com/paknejadmasih-pixel/fachdeutsch/releases/latest/download/Fachdeutsch-Trainer.apk
+
+Hinweis: Der Signaturschlüssel (`android/fachdeutsch.jks`) liegt für diese private Lern-App offen im Repository.
+Installiere Updates nur aus diesem Repository.

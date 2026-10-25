@@ -1,0 +1,44 @@
+name: Android-App bauen
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  apk:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '17'
+
+      - uses: android-actions/setup-android@v3
+
+      - uses: gradle/actions/setup-gradle@v4
+        with:
+          gradle-version: '8.9'
+
+      - name: APK bauen
+        working-directory: android
+        run: gradle --no-daemon assembleRelease
+
+      - name: APK benennen
+        run: cp android/app/build/outputs/apk/release/app-release.apk Fachdeutsch-Trainer.apk
+
+      - name: Als Release veröffentlichen
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: v1.0.${{ github.run_number }}
+          name: Fachdeutsch-Trainer 1.0.${{ github.run_number }}
+          files: Fachdeutsch-Trainer.apk
+          make_latest: true
+          body: |
+            Android-App „Fachdeutsch-Trainer“.
+            Auf dem Handy herunterladen → öffnen → „Installieren“ (einmalig „Unbekannte Apps installieren“ für Chrome erlauben).

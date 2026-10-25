@@ -1,0 +1,43 @@
+plugins {
+    id 'com.android.application'
+}
+
+def runNumber = (System.getenv("GITHUB_RUN_NUMBER") ?: "1").toInteger()
+
+android {
+    namespace 'app.fachdeutsch.trainer'
+    compileSdk 34
+
+    defaultConfig {
+        applicationId 'app.fachdeutsch.trainer'
+        minSdk 24
+        targetSdk 34
+        versionCode runNumber
+        versionName "1.0." + runNumber
+    }
+
+    signingConfigs {
+        release {
+            storeFile file('../fachdeutsch.jks')
+            storePassword 'fachdeutsch-app'
+            keyAlias 'fachdeutsch'
+            keyPassword 'fachdeutsch-app'
+        }
+    }
+
+    buildTypes {
+        release {
+            minifyEnabled false
+            signingConfig signingConfigs.release
+        }
+    }
+
+    compileOptions {
+        sourceCompatibility JavaVersion.VERSION_17
+        targetCompatibility JavaVersion.VERSION_17
+    }
+}
+
+dependencies {
+    implementation 'androidx.webkit:webkit:1.11.0'
+}
