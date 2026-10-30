@@ -1387,17 +1387,38 @@ function renderRecent(){
 function renderLists(){ renderHome(); if (state.view === "training") renderRecent(); if (state.view === "fortschritt") renderProgress(); }
 
 /* ================= Card training ================= */
-function startSession(mode, cat){
-  let q = [];
+/* Only cards that are due today are studied. Cards graded "Leicht" etc. stay away until their date.
+   Extra practice of non-due cards is possible on request and never changes the schedule (except "Nochmal"). */
+function sessionPool(mode, cat, dueOnly){
   const isWord = it => catSkill(it.category) === "w";
-  if (mode === "due") q = dueItems().sort((a,b)=> (node("cat",normCat(a.category)).m - node("cat",normCat(b.category)).m) || ((a.due||0)-(b.due||0))).slice(0,30);
-  else if (mode === "words") q = dueItems(isWord).concat(shuffle(state.items.filter(it => isWord(it) && (it.due||0) > Date.now()))).slice(0,20);
-  else if (mode === "rules") q = dueItems(it => !isWord(it)).concat(shuffle(state.items.filter(it => !isWord(it) && (it.due||0) > Date.now()))).slice(0,20);
-  else if (mode === "weakwords") q = weakItems(15, true);
-  else if (mode === "focus"){ const k = cat || todayFocus().weak[0] || (weakest()[0]||{}).key; if (!k) return; q = state.items.filter(it=>normCat(it.category)===k).sort((a,b)=>((b.lapses||0)-(a.lapses||0)) || ((a.due||0)-(b.due||0))).slice(0,20); }
-  if (!q.length){ toast("Keine passenden Karten"); return; }
-  state.session = { queue: q.map(i=>i.id), total: q.length, done: 0, shown: false, right: 0, spoken: "" };
+  const now = Date.now();
+  const ok = it => !dueOnly || (it.due || 0) <= now;
+  if (mode === "due") return state.items.filter(ok).sort((a,b)=> (node("cat",normCat(a.category)).m - node("cat",normCat(b.category)).m) || ((a.due||0)-(b.due||0))).slice(0,30);
+  if (mode === "words") return state.items.filter(it => isWord(it) && ok(it)).sort((a,b)=>(a.due||0)-(b.due||0)).slice(0,20);
+  if (mode === "rules") return state.items.filter(it => !isWord(it) && ok(it)).sort((a,b)=>(a.due||0)-(b.due||0)).slice(0,20);
+  if (mode === "weakwords") return weakItems(200, true).filter(ok).slice(0,15);
+  if (mode === "focus"){ const k = cat || todayFocus().weak[0] || (weakest()[0]||{}).key; if (!k) return []; return state.items.filter(it => normCat(it.category) === k && ok(it)).sort((a,b)=>((b.lapses||0)-(a.lapses||0)) || ((a.due||0)-(b.due||0))).slice(0,20); }
+  return [];
+}
+function nextDueText(mode, cat){
+  const later = sessionPool(mode, cat, false).filter(it => (it.due||0) > Date.now()).sort((a,b)=>(a.due||0)-(b.due||0));
+  return later.length ? "Nächste fällige Karte: " + new Date(later[0].due).toLocaleDateString("de-DE",{weekday:"short",day:"2-digit",month:"2-digit"}) + "." : "";
+}
+function startSession(mode, cat, practice){
+  const q = practice ? shuffle(sessionPool(mode, cat, false)).slice(0, 20) : sessionPool(mode, cat, true);
   showView("training"); $("trainArea").hidden = false; $("trainSetup").hidden = true;
+  if (!q.length){
+    state.session = null; $("trainProg").style.width = "100%";
+    const anyCards = sessionPool(mode, cat, false).length > 0;
+    $("cardHost").replaceChildren(h("div",{class:"box anim"},
+      h("div",{style:"font:700 22px var(--f-display)"}, "Für heute fertig ✓"),
+      h("div",null, "Alle Karten dieser Auswahl sind erst später wieder dran. " + nextDueText(mode, cat)),
+      h("div",{class:"fa-hint",style:"margin:0"}, "همهٔ کارت‌های امروز را مرور کرده‌ای. کارت‌ها طبق برنامه در روز خودشان دوباره می‌آیند."),
+      anyCards ? h("div",{class:"row"}, h("button",{class:"btn",type:"button",onclick:()=>startSession(mode, cat, true)},"Trotzdem üben (Plan bleibt unverändert)")) : null,
+      h("div",{class:"row"}, h("button",{class:"btn primary",type:"button",onclick:()=>{ endSession(); genExercises("weak"); }},"Stattdessen adaptive Übung"))));
+    return;
+  }
+  state.session = { queue: q.map(i=>i.id), total: q.length, done: 0, shown: false, right: 0, spoken: "", practice: !!practice, undo: [] };
   trk.last = Date.now(); renderCard(); $("trainArea").scrollIntoView({block:"start"});
 }
 function endSession(msg){
@@ -1428,20 +1449,39 @@ function renderCard(){
       enLine(it.en), it.fa ? fa(it.fa) : null, ruleBlock(it, it.id, null)));
     const g = (q, label, cls) => h("button",{type:"button",class:cls,onclick:()=>grade(it,q)}, label, h("small",null, fmtInterval(it,q)));
     card.append(h("div",{class:"grades"}, g(0,"Nochmal","g0"), g(3,"Schwer",""), g(4,"Gut",""), g(5,"Leicht","g5")));
+    if (s.practice) card.append(h("div",{class:"muted",style:"font-size:12px;padding:6px 12px"},"Übungsmodus: Der Wiederholungsplan bleibt unverändert (außer bei „Nochmal“)."));
   }
-  $("cardHost").replaceChildren(card);
+  const wrap = h("div",null, card);
+  if (s.undo && s.undo.length){ const last = s.undo[s.undo.length-1]; wrap.append(h("div",{class:"row",style:"margin-top:10px"}, h("button",{class:"btn sm",type:"button",onclick:undoGrade}, "↶ Letzte Bewertung zurücknehmen (" + last.label + ")"))); }
+  $("cardHost").replaceChildren(wrap);
   const rb = document.getElementById("revealBtn"); if (rb) rb.focus({preventScroll:true});
   const key = it.id + (s.shown ? ":b" : ":f");
   if (TTS.auto && s.spoken !== key){ s.spoken = key; if (s.shown) speak(it.satz || it.back, "de-DE", backSpk); else speak(it.front, "de-DE", frontSpk); }
 }
+const SRS_FIELDS = ["ease","interval","reps","lapses","seen","wrong","due","last"];
 async function grade(it, q){
   const s = state.session; if (!s) return;
-  const patch = schedule(it, q);
+  const keep = s.practice && q >= 3;
+  const prev = {}; SRS_FIELDS.forEach(k => prev[k] = it[k] === undefined ? null : it[k]);
+  s.undo.push({ id: it.id, prev, queue: s.queue.slice(), done: s.done, right: s.right, total: s.total, correct: q >= 3, changed: !keep, label: q === 0 ? "Nochmal" : q === 3 ? "Schwer" : q === 4 ? "Gut" : "Leicht" });
+  if (s.undo.length > 30) s.undo.shift();
   s.queue.shift(); s.done++; if (q >= 3) s.right++;
   if (q < 3){ s.queue.splice(Math.min(3, s.queue.length), 0, it.id); s.total++; }
-  s.shown = false; Object.assign(it, patch);
-  track(catSkill(it.category)); logReview(q >= 3); adaptCard(it, q); renderCard();
+  s.shown = false;
+  track(catSkill(it.category)); logReview(q >= 3); adaptCard(it, q);
+  if (keep){ renderCard(); return; }
+  const patch = schedule(it, q); Object.assign(it, patch); renderCard();
   try { await updateItem(it.id, patch); } catch(e){ toast("Speichern fehlgeschlagen. Prüfe die Verbindung."); }
+}
+async function undoGrade(){
+  const s = state.session; if (!s || !s.undo.length) return;
+  const u = s.undo.pop();
+  s.queue = u.queue; s.done = u.done; s.right = u.right; s.total = u.total; s.shown = true; s.spoken = u.id + ":b";
+  const d = todayRec(); d.r = Math.max(0, (d.r||0) - 1); if (u.correct) d.c = Math.max(0, (d.c||0) - 1); saveStatsSoon();
+  const it = state.items.find(x => x.id === u.id);
+  if (it && u.changed){ const patch = {}; SRS_FIELDS.forEach(k => { patch[k] = u.prev[k] === null ? 0 : u.prev[k]; }); Object.assign(it, patch); try { await updateItem(it.id, patch); } catch(e){ toast("Zurücknehmen konnte nicht gespeichert werden."); } }
+  toast("Bewertung „" + u.label + "“ zurückgenommen – bewerte die Karte neu.");
+  renderCard(); renderHome();
 }
 
 /* ================= KI exercises (grammar) ================= */
