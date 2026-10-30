@@ -367,6 +367,10 @@ textarea{min-height:120px;resize:vertical}
 .wiz-steps i.on{background:var(--accent)}
 .help{border:1px dashed var(--line-strong);padding:10px 12px;font-size:13px;background:var(--surface)}
 #saveState.ok{color:var(--good)} #saveState.busy{color:var(--muted)} #saveState.bad{color:var(--bad);font-weight:600}
+.w{cursor:pointer;border-radius:3px;-webkit-tap-highlight-color:transparent}
+.w:hover,.w:active{background:var(--accent-soft)}
+.sheet-bg{position:fixed;inset:0;background:rgba(0,0,0,.45);z-index:30;display:flex;align-items:flex-end;justify-content:center}
+.sheet{background:var(--bg);width:100%;max-width:760px;max-height:86vh;overflow:auto;border-top:3px solid var(--accent);padding:14px max(16px,env(safe-area-inset-right,0px)) calc(22px + env(safe-area-inset-bottom,0px)) max(16px,env(safe-area-inset-left,0px));display:grid;gap:14px}
 .toast{position:fixed;left:50%;transform:translateX(-50%);bottom:calc(16px + env(safe-area-inset-bottom,0px));background:var(--ink);color:var(--bg);padding:10px 14px;font-size:14px;z-index:20;max-width:calc(100% - 32px)}
 @media (prefers-reduced-motion:no-preference){.card,.box.anim{animation:in .18s ease-out}@keyframes in{from{transform:translateY(4px)}to{transform:none}}}
 </style>
@@ -426,6 +430,7 @@ textarea{min-height:120px;resize:vertical}
     <div class="ttsbar" data-ttsbar></div>
     <section id="trainSetup">
       <div class="sec-h"><h2>Karten lernen</h2><span class="meta">Wiederholungsplan</span></div>
+      <p class="lead">Tipp: Tippe auf ein Wort in einem Satz – du siehst alle Bedeutungen mit Beispielen und kannst es als Karte speichern.</p>
       <div class="row stretch">
         <button class="btn primary" id="startDue">Fällige Karten</button>
         <button class="btn" id="startWords">Wortschatz</button>
@@ -495,7 +500,7 @@ textarea{min-height:120px;resize:vertical}
     </section>
     <section>
       <div class="sec-h"><h2>Hörverstehen</h2><span class="meta">Hören · KI-Text</span></div>
-      <p class="lead">Ein kurzer Text aus deinem Fachgebiet wird vorgelesen. Beantworte die Fragen, ohne den Text zu lesen.</p>
+      <p class="lead">Ein kurzer Text aus deinem Fachgebiet wird vorgelesen – auf deiner Hörstufe. Beantworte die Fragen, ohne den Text zu lesen. Richtig oder falsch passt die Stufe an.</p>
       <div class="row"><button class="btn primary" id="genListen">Neuer Hörtext</button><span id="lsStatus" class="muted"></span></div>
       <div id="lsHost"></div>
     </section>
@@ -538,6 +543,11 @@ textarea{min-height:120px;resize:vertical}
       <div class="sec-h"><h2>Fertigkeiten</h2><span class="meta">Sicherheit · Stufe · 7 Tage</span></div>
       <div class="tol" id="skillBars"></div>
       <div class="tol-legend">Balken = Sicherheit aus deinen letzten Ergebnissen. Stufe = Schwierigkeit, auf der du gerade trainierst. ↑ ↓ → = Veränderung der Stufe in 7 Tagen.</div>
+    </section>
+    <section>
+      <div class="sec-h"><h2>Schwierigste Wörter &amp; Sätze</h2><span class="meta">automatisch erkannt</span></div>
+      <div class="list" id="hardList"></div>
+      <div class="tol-legend">Aus deinen Antworten berechnet, neue Fehler zählen mehr. Diese Karten kommen öfter und werden in die Übungen eingebaut.</div>
     </section>
     <section>
       <div class="sec-h"><h2>Grammatik &amp; Wortschatz</h2><span class="meta">nach Kategorie</span></div>
@@ -618,6 +628,7 @@ const BANK = {"artikel":[[2.75,"Ergänze den Artikel: ___ Maschine steht in der 
 const SPEAK_BANK = [{"typ":"Vorstellungsgespräch","aufgabe":"Stellen Sie sich kurz vor: Ausbildung, aktuelle Position und warum Sie sich für eine Stelle in der Industrie interessieren.","en":"Introduce yourself: education, current position and why you are interested in a job in industry.","redemittel":["Ich habe … studiert und promoviert.","Zurzeit arbeite ich als …","Mein Schwerpunkt liegt auf …","Ich möchte meine Erfahrung in der Praxis einsetzen."],"muster":"Ich habe Maschinenbau studiert und im Bereich Fertigungstechnik promoviert. Zurzeit leite ich an einer Hochschule eine Forschungsgruppe für Schleiftechnik. Mein Schwerpunkt liegt auf der Optimierung von Schleifprozessen und der FEM-Simulation. Ich interessiere mich für eine Stelle in der Industrie, weil ich meine Erfahrung direkt in der Produktion einsetzen möchte. Besonders reizt mich, Prozesse vom Labor bis zur Serie zu begleiten."},{"typ":"Prozess erklären","aufgabe":"Erklären Sie einem neuen Kollegen, wie ein Schleifversuch bei Ihnen abläuft.","en":"Explain to a new colleague how a grinding test works in your lab.","redemittel":["Zuerst …","Danach …","Anschließend …","Zum Schluss …"],"muster":"Zuerst spannen wir das Werkstück auf und richten die Schleifscheibe ab. Danach stellen wir die Parameter ein, also Schnittgeschwindigkeit, Vorschub und Zustellung. Anschließend schleifen wir und messen dabei die Schleifkräfte. Zum Schluss prüfen wir die Rauheit und die Randzone. Die Ergebnisse dokumentieren wir in einer Tabelle."},{"typ":"Problem im Meeting","aufgabe":"Im Teammeeting: Die Maschine ist seit gestern defekt. Erklären Sie das Problem und schlagen Sie eine Lösung vor.","en":"In a team meeting: the machine has been broken since yesterday. Explain the problem and suggest a solution.","redemittel":["Leider gibt es ein Problem mit …","Seit gestern …","Ich schlage vor, dass …","Bis dahin könnten wir …"],"muster":"Leider gibt es ein Problem mit der Schleifmaschine. Seit gestern zeigt die Spindel starke Vibrationen, deshalb haben wir die Versuche gestoppt. Der Service kommt voraussichtlich am Donnerstag. Ich schlage vor, dass wir die dringenden Versuche auf die zweite Maschine verlegen. Bis dahin könnten wir die Auswertung der letzten Messungen abschließen."},{"typ":"Kundentelefonat","aufgabe":"Ein Kunde ruft an und fragt, wann die Prüfberichte fertig sind. Sie brauchen noch eine Woche.","en":"A customer calls and asks when the test reports will be ready. You need one more week.","redemittel":["Vielen Dank für Ihren Anruf.","Ich verstehe, dass …","Wir brauchen leider noch …","Ich melde mich spätestens am …"],"muster":"Vielen Dank für Ihren Anruf, Herr Müller. Ich verstehe, dass Sie die Berichte dringend brauchen. Wir haben die Messungen abgeschlossen, aber die Auswertung dauert leider noch etwa eine Woche. Ich schicke Ihnen heute schon die ersten Ergebnisse per E-Mail. Den vollständigen Bericht bekommen Sie spätestens am nächsten Freitag."},{"typ":"Smalltalk","aufgabe":"In der Kaffeepause fragt ein Kollege, was Sie am Wochenende gemacht haben.","en":"In the coffee break a colleague asks what you did at the weekend.","redemittel":["Am Wochenende war ich …","Das Wetter war …","Und du?","Das klingt gut!"],"muster":"Am Wochenende war ich mit meiner Familie an der Donau spazieren. Das Wetter war zum Glück schön, nur ein bisschen kalt. Am Sonntag haben wir Freunde besucht und zusammen gekocht. Es war entspannend nach der stressigen Woche. Und du, hast du etwas Schönes gemacht?"},{"typ":"Fachfrage im Interview","aufgabe":"Wie würden Sie vorgehen, wenn an geschliffenen Teilen Schleifbrand auftritt?","en":"How would you proceed if grinding burn appears on ground parts?","redemittel":["Zuerst würde ich …","Mögliche Ursachen sind …","Um das zu überprüfen, …","Langfristig sollte man …"],"muster":"Zuerst würde ich die betroffenen Teile sperren und die Randzone prüfen, zum Beispiel mit einer Nitalätzung. Mögliche Ursachen sind eine zu hohe Zustellung, eine stumpfe Scheibe oder zu wenig Kühlschmierstoff. Um das zu überprüfen, würde ich die Prozessdaten und den Abrichtzyklus analysieren. Danach würde ich die Parameter anpassen und mit einem kleinen Versuchsplan absichern. Langfristig sollte man die Schleifleistung überwachen, damit das Problem früh erkannt wird."},{"typ":"Stärken und Schwächen","aufgabe":"Nennen Sie eine Stärke und eine Schwäche und geben Sie jeweils ein Beispiel.","en":"Name one strength and one weakness and give an example of each.","redemittel":["Eine meiner Stärken ist …","Zum Beispiel habe ich …","Woran ich noch arbeite, ist …","Deshalb …"],"muster":"Eine meiner Stärken ist analytisches Denken. Zum Beispiel habe ich mit statistischer Versuchsplanung die Anzahl der Versuche in einem Projekt halbiert. Woran ich noch arbeite, ist mein Deutsch in spontanen Gesprächen. Deshalb lerne ich jeden Tag und spreche im Team bewusst Deutsch. Ich merke schon, dass es von Woche zu Woche besser wird."},{"typ":"Kurzpräsentation","aufgabe":"Präsentieren Sie in einer Minute das wichtigste Ergebnis Ihres letzten Projekts.","en":"Present the most important result of your last project in one minute.","redemittel":["Ich möchte Ihnen kurz … vorstellen.","Das Ziel war …","Wie Sie sehen, …","Zusammenfassend lässt sich sagen, …"],"muster":"Ich möchte Ihnen kurz die Ergebnisse unseres Vergleichs von zwei Schleifölen vorstellen. Das Ziel war, den Verschleiß beim Schleifen von Hartmetall zu senken. Wir haben beide Öle unter gleichen Bedingungen getestet. Wie Sie sehen, war der Verschleiß mit dem neuen Öl um etwa 20 Prozent geringer. Zusammenfassend lässt sich sagen, dass sich der Wechsel wirtschaftlich lohnt."}];
 const WRITE_BANK = [{"typ":"E-Mail an einen Kollegen","aufgabe":"Bitten Sie einen Kollegen per E-Mail, Ihnen die Messdaten vom letzten Versuch bis Mittwoch zu schicken.","en":"Ask a colleague by email to send you the measurement data from the last test by Wednesday.","punkte":["Bitte","Grund","Termin","Dank"],"woerter":"50–80","muster":"Hallo Thomas,\n\nkönntest du mir bitte die Messdaten vom letzten Schleifversuch schicken? Ich brauche sie für den Zwischenbericht an den Kunden. Es wäre super, wenn ich die Daten bis Mittwoch bekommen könnte.\n\nVielen Dank im Voraus!\n\nViele Grüße"},{"typ":"E-Mail an einen Kunden","aufgabe":"Informieren Sie einen Kunden, dass sich die Lieferung der Prüfteile um eine Woche verzögert.","en":"Inform a customer that the delivery of the test parts is delayed by one week.","punkte":["Entschuldigung","Grund","neuer Termin","Lösung anbieten"],"woerter":"70–100","muster":"Sehr geehrter Herr Schneider,\n\nleider müssen wir Ihnen mitteilen, dass sich die Lieferung der Prüfteile um eine Woche verzögert. Grund ist ein Ausfall unserer Schleifmaschine. Der neue Liefertermin ist der 14. November. Gerne schicken wir Ihnen vorab die Ergebnisse der ersten Teile. Wir bitten um Ihr Verständnis.\n\nMit freundlichen Grüßen"},{"typ":"Kurzer Versuchsbericht","aufgabe":"Fassen Sie einen Schleifversuch kurz zusammen: Ziel, Durchführung, Ergebnis, Empfehlung.","en":"Summarize a grinding test: aim, procedure, result, recommendation.","punkte":["Ziel","Durchführung","Ergebnis","Empfehlung"],"woerter":"80–120","muster":"Ziel des Versuchs war es, den Einfluss der Zustellung auf die Rauheit zu untersuchen. Dazu wurden zehn Proben aus 100Cr6 mit drei verschiedenen Zustellungen geschliffen. Die Rauheit wurde anschließend mit einem Tastschnittgerät gemessen. Es zeigte sich, dass die Rauheit mit steigender Zustellung deutlich zunimmt. Für die Serie wird daher eine Zustellung von 5 µm empfohlen."},{"typ":"Absatz für ein Anschreiben","aufgabe":"Schreiben Sie den Absatz eines Anschreibens, in dem Sie Ihre wichtigste Qualifikation beschreiben.","en":"Write the paragraph of a cover letter describing your most important qualification.","punkte":["aktuelle Position","Verantwortung","konkreter Erfolg","Nutzen für die Firma"],"woerter":"60–90","muster":"In meiner aktuellen Position leite ich ein Team von wissenschaftlichen Mitarbeitern im Bereich Schleiftechnik. Dabei verantworte ich Industrieprojekte von der Planung bis zur Ergebnispräsentation beim Kunden. Durch den Einsatz statistischer Versuchsplanung und FEM-Simulation konnte ich Entwicklungszeiten deutlich verkürzen. Diese Erfahrung möchte ich gern in Ihr Unternehmen einbringen."},{"typ":"Antwort an eine Recruiterin","aufgabe":"Eine Recruiterin schreibt Ihnen wegen einer Stelle. Bedanken Sie sich, zeigen Sie Interesse und schlagen Sie einen Telefontermin vor.","en":"A recruiter contacts you about a job. Thank her, show interest and suggest a time for a call.","punkte":["Dank","Interesse","Fragen","Terminvorschlag"],"woerter":"50–80","muster":"Sehr geehrte Frau Klein,\n\nvielen Dank für Ihre Nachricht und Ihr Interesse an meinem Profil. Die Stelle als Prozessingenieur klingt sehr spannend. Gerne würde ich mehr über die Aufgaben und das Team erfahren. Passt Ihnen ein Telefonat am Donnerstag zwischen 14 und 16 Uhr?\n\nMit freundlichen Grüßen"},{"typ":"Protokollnotiz","aufgabe":"Fassen Sie die Ergebnisse eines Teammeetings in 3–4 Sätzen zusammen: Entscheidungen, Aufgaben, Termine.","en":"Summarize a team meeting in 3–4 sentences: decisions, tasks, dates.","punkte":["Entscheidung","Aufgaben mit Namen","nächster Termin"],"woerter":"40–70","muster":"Im Teammeeting am Montag wurde beschlossen, die Versuchsreihe um zwei Wochen zu verlängern. Herr Becker bestellt bis Freitag neue Schleifscheiben. Frau Yilmaz wertet die bisherigen Messdaten aus. Das nächste Meeting findet am 18. November um 10 Uhr statt."},{"typ":"Reklamation an einen Lieferanten","aufgabe":"Die gelieferten Schleifscheiben haben die falsche Körnung. Schreiben Sie dem Lieferanten.","en":"The grinding wheels delivered have the wrong grit size. Write to the supplier.","punkte":["Bestellung","Problem","Forderung","Rücksendung"],"woerter":"70–100","muster":"Sehr geehrte Damen und Herren,\n\nam 3. November haben wir 20 Schleifscheiben bei Ihnen bestellt (Bestellnummer 4711). Leider haben die gelieferten Scheiben die Körnung 80 statt 46. Wir bitten Sie, die Scheiben umzutauschen und die richtigen bis Ende der Woche zu liefern. Die falsche Ware senden wir Ihnen gern zurück.\n\nMit freundlichen Grüßen"},{"typ":"Abwesenheitsnotiz","aufgabe":"Schreiben Sie eine Abwesenheitsnotiz (Out-of-Office) für zwei Wochen Urlaub.","en":"Write an out-of-office message for two weeks of holiday.","punkte":["Zeitraum","Erreichbarkeit","Vertretung","Rückkehr"],"woerter":"40–60","muster":"Vielen Dank für Ihre Nachricht. Ich bin vom 22.12. bis 05.01. nicht im Büro und habe keinen Zugriff auf meine E-Mails. In dringenden Fällen wenden Sie sich bitte an meinen Kollegen Herrn Weber. Ab dem 06.01. bin ich wieder für Sie erreichbar."}];
 
+const LISTEN_BANK = [{"lvl":2.75,"titel":"Ansage in der Firma","text":"Guten Morgen, liebe Kolleginnen und Kollegen. Heute um 14 Uhr gibt es eine kurze Sicherheitsunterweisung in Halle 3. Bitte bringen Sie Ihre Schutzbrille und Ihre Sicherheitsschuhe mit. Die Unterweisung dauert etwa dreißig Minuten. Danach können Sie wieder an Ihre Arbeitsplätze gehen. Die Kantine ist heute wegen Reparaturarbeiten nur bis 13 Uhr geöffnet. Wer später essen möchte, kann im Café im Erdgeschoss etwas kaufen. Vielen Dank.","en":"Good morning, dear colleagues. Today at 2 pm there is a short safety briefing in hall 3. Please bring your safety glasses and safety shoes. The briefing takes about thirty minutes. Afterwards you can return to your workplaces. Because of repair work the canteen is only open until 1 pm today. Anyone who wants to eat later can buy something in the café on the ground floor. Thank you.","fragen":[{"frage":"Wann ist die Unterweisung?","optionen":["Um 14 Uhr","Um 13 Uhr","Um 12:30 Uhr"]},{"frage":"Was sollen die Mitarbeiter mitbringen?","optionen":["Schutzbrille und Sicherheitsschuhe","Laptop und Ausweis","Handschuhe und Helm"]},{"frage":"Warum schließt die Kantine früher?","optionen":["Wegen Reparaturarbeiten","Wegen der Unterweisung","Weil es kein Essen mehr gibt"]}]},{"lvl":2.75,"titel":"Sprachnachricht von Jonas","text":"Hallo, hier ist Jonas. Ich stehe leider im Stau auf der B14 und komme etwa eine halbe Stunde später. Kannst du bitte schon die Maschine einschalten, damit sie warm wird? Die Proben liegen im grauen Schrank, im zweiten Fach von oben. Wir müssen heute zwölf Proben schleifen. Wenn der Kunde anruft, sag ihm bitte, dass ich ihn um elf Uhr zurückrufe. Bis gleich!","en":"Hi, this is Jonas. Unfortunately I'm stuck in traffic on the B14 and will be about half an hour late. Could you please switch on the machine already so it warms up? The samples are in the grey cupboard, second shelf from the top. We have to grind twelve samples today. If the customer calls, please tell him I'll call back at eleven. See you soon!","fragen":[{"frage":"Warum kommt Jonas später?","optionen":["Er steht im Stau","Er ist krank","Er hat den Bus verpasst"]},{"frage":"Wo liegen die Proben?","optionen":["Im grauen Schrank","Auf der Maschine","Im Büro von Jonas"]},{"frage":"Was soll man dem Kunden sagen?","optionen":["Jonas ruft um elf Uhr zurück","Die Proben sind fertig","Er soll morgen wieder anrufen"]}]},{"lvl":3.25,"titel":"Teambesprechung","text":"Kurz zum Stand der Versuche: Letzte Woche haben wir zwanzig Proben aus Werkzeugstahl geschliffen. Die Rauheit war bei den meisten Proben im Zielbereich, nur bei drei Proben war sie zu hoch. Wir vermuten, dass die Schleifscheibe nicht oft genug abgerichtet wurde. Deshalb richten wir ab sofort nach jeder fünften Probe ab. Außerdem fehlt uns noch Kühlschmierstoff. Frau Berger bestellt bis Mittwoch neuen. Die nächsten Versuche starten am Donnerstag.","en":"A quick update on the tests: last week we ground twenty samples of tool steel. For most samples the roughness was within the target range; only three samples were too rough. We suspect the grinding wheel was not dressed often enough. That's why from now on we dress after every fifth sample. We're also short of coolant. Ms Berger will order new coolant by Wednesday. The next tests start on Thursday.","fragen":[{"frage":"Wie viele Proben lagen außerhalb des Zielbereichs?","optionen":["Drei","Fünf","Zwanzig"]},{"frage":"Was ist die vermutete Ursache?","optionen":["Die Scheibe wurde zu selten abgerichtet","Der Stahl war zu hart","Es gab zu viel Kühlschmierstoff"]},{"frage":"Wann starten die nächsten Versuche?","optionen":["Am Donnerstag","Am Mittwoch","Nächste Woche"]}]},{"lvl":3.25,"titel":"Anruf vom Lieferanten","text":"Guten Tag, Firma Keller, mein Name ist Schulz. Sie hatten wegen Ihrer Bestellung angerufen. Die Schleifscheiben sind leider noch nicht auf Lager, weil unser Hersteller Lieferprobleme hat. Wir erwarten die Ware in etwa zehn Tagen. Als Alternative könnten wir Ihnen Scheiben mit einer etwas feineren Körnung sofort schicken. Der Preis wäre gleich. Bitte geben Sie mir bis morgen Bescheid, welche Lösung Sie bevorzugen.","en":"Good afternoon, Keller company, my name is Schulz. You called about your order. Unfortunately the grinding wheels are not yet in stock because our manufacturer has supply problems. We expect the goods in about ten days. As an alternative we could send you wheels with a slightly finer grit right away. The price would be the same. Please let me know by tomorrow which solution you prefer.","fragen":[{"frage":"Warum sind die Scheiben nicht da?","optionen":["Der Hersteller hat Lieferprobleme","Die Bestellung ging verloren","Sie sind zu teuer geworden"]},{"frage":"Was bietet Herr Schulz an?","optionen":["Scheiben mit feinerer Körnung","Zehn Prozent Rabatt","Eine Lieferung morgen"]},{"frage":"Bis wann soll der Kunde antworten?","optionen":["Bis morgen","In zehn Tagen","Bis Ende des Monats"]}]},{"lvl":3.75,"titel":"Kurzvortrag: Warum kühlen?","text":"Beim Schleifen entsteht sehr viel Wärme, weil ein großer Teil der Energie in der Kontaktzone in Wärme umgewandelt wird. Ohne ausreichende Kühlung kann es zu Schleifbrand kommen. Das bedeutet, dass die Randzone des Werkstücks thermisch geschädigt wird. Die Härte sinkt, und es können Zugeigenspannungen entstehen, die später zu Rissen führen. Der Kühlschmierstoff hat deshalb zwei Aufgaben: Er kühlt das Werkstück und schmiert den Kontakt zwischen Korn und Material. Öle schmieren besser, Emulsionen kühlen besser.","en":"Grinding produces a lot of heat because a large part of the energy in the contact zone is converted into heat. Without sufficient cooling, grinding burn can occur. This means the surface layer of the workpiece is thermally damaged. Hardness drops and tensile residual stresses can develop, which later lead to cracks. The coolant therefore has two jobs: it cools the workpiece and lubricates the contact between grain and material. Oils lubricate better, emulsions cool better.","fragen":[{"frage":"Was passiert bei Schleifbrand?","optionen":["Die Randzone wird thermisch geschädigt","Die Scheibe bricht","Das Werkstück wird härter"]},{"frage":"Welche zwei Aufgaben hat der Kühlschmierstoff?","optionen":["Kühlen und schmieren","Reinigen und messen","Schmieren und härten"]},{"frage":"Was kühlt laut Vortrag besser?","optionen":["Emulsionen","Öle","Beide gleich gut"]}]},{"lvl":3.75,"titel":"Vorstellungsgespräch: die Abteilung","text":"Vielen Dank, dass Sie heute gekommen sind. Ich möchte Ihnen kurz unsere Abteilung vorstellen. Wir sind ein Team von acht Ingenieuren und arbeiten vor allem an der Optimierung unserer Schleifprozesse für Turbinenschaufeln. Die Stelle ist neu, weil wir eine zweite Fertigungslinie aufbauen. Sie würden die Prozessentwicklung von Anfang an begleiten. Reisen sind selten, etwa zweimal im Jahr zu unserem Werk in Polen. Jetzt würde mich interessieren: Warum möchten Sie von der Forschung in die Industrie wechseln?","en":"Thank you for coming today. Let me briefly introduce our department. We are a team of eight engineers and work mainly on optimizing our grinding processes for turbine blades. The position is new because we are setting up a second production line. You would accompany process development from the start. Travel is rare, about twice a year to our plant in Poland. Now I'd be interested: why do you want to move from research to industry?","fragen":[{"frage":"Warum ist die Stelle neu?","optionen":["Eine zweite Fertigungslinie wird aufgebaut","Ein Kollege geht in Rente","Die Abteilung wird verkleinert"]},{"frage":"Wie oft muss man reisen?","optionen":["Etwa zweimal im Jahr","Jeden Monat","Nie"]},{"frage":"Was möchte die Personalleiterin am Ende wissen?","optionen":["Warum er in die Industrie wechseln will","Welches Gehalt er erwartet","Wann er anfangen kann"]}]},{"lvl":4.25,"titel":"Projektmeeting mit dem Kunden","text":"Wir haben die Prozessparameter in drei Iterationen optimiert. Durch eine geringere Zustellung und eine höhere Werkstückgeschwindigkeit konnten wir die Hauptzeit um etwa fünfzehn Prozent verkürzen, ohne dass die Oberflächengüte darunter leidet. Allerdings ist der Scheibenverschleiß leicht gestiegen, was die Werkzeugkosten pro Bauteil um rund drei Prozent erhöht. Unterm Strich ergibt sich trotzdem ein deutlicher Kostenvorteil. Bevor wir die Parameter in die Serie übernehmen, schlagen wir einen Dauerversuch über zwei Schichten vor, um die Prozessstabilität abzusichern.","en":"We optimized the process parameters in three iterations. With a lower depth of cut and a higher workpiece speed we shortened the machining time by about fifteen percent without affecting surface quality. However, wheel wear rose slightly, increasing tool costs per part by around three percent. Overall there is still a clear cost advantage. Before transferring the parameters to series production, we propose a long-term test over two shifts to secure process stability.","fragen":[{"frage":"Um wie viel wurde die Hauptzeit verkürzt?","optionen":["Um etwa 15 %","Um etwa 3 %","Um etwa 30 %"]},{"frage":"Was ist der Nachteil der neuen Parameter?","optionen":["Höherer Scheibenverschleiß","Schlechtere Oberfläche","Längere Rüstzeit"]},{"frage":"Was wird vor der Serie vorgeschlagen?","optionen":["Ein Dauerversuch über zwei Schichten","Eine neue Maschine","Eine weitere Iteration im Labor"]}]},{"lvl":4.25,"titel":"Nachrichten aus dem Maschinenbau","text":"Der deutsche Maschinenbau rechnet für das kommende Jahr mit einer leichten Erholung. Nach Angaben des Branchenverbands sind die Auftragseingänge im dritten Quartal erstmals seit längerer Zeit wieder gestiegen, vor allem aus dem Ausland. Gleichzeitig klagen viele Unternehmen über den Fachkräftemangel: Fast jede zweite Firma kann offene Ingenieurstellen nicht zeitnah besetzen. Besonders gefragt sind Fachleute mit Erfahrung in Automatisierung und Digitalisierung. Einige Betriebe bieten deshalb gezielt Sprachkurse für internationale Bewerber an.","en":"German mechanical engineering expects a slight recovery next year. According to the industry association, incoming orders rose in the third quarter for the first time in a long while, mainly from abroad. At the same time many companies complain about the skills shortage: almost every second firm cannot fill open engineering positions promptly. Experts with experience in automation and digitalization are especially sought after. Some companies therefore offer targeted language courses for international applicants.","fragen":[{"frage":"Woher kamen vor allem die neuen Aufträge?","optionen":["Aus dem Ausland","Aus Deutschland","Aus der Autoindustrie"]},{"frage":"Welches Problem haben viele Firmen?","optionen":["Sie finden nicht genug Fachkräfte","Sie haben zu wenige Aufträge","Die Energie ist zu teuer"]},{"frage":"Was bieten einige Betriebe internationalen Bewerbern an?","optionen":["Sprachkurse","Höhere Gehälter","Wohnungen"]}]},{"lvl":4.75,"titel":"Fachvortrag: Simulation des Ritzens","text":"Die Finite-Elemente-Simulation des Einkornritzens macht Vorgänge in der Kontaktzone sichtbar, die experimentell kaum zugänglich sind. Allerdings hängt die Aussagekraft der Ergebnisse maßgeblich vom gewählten Materialmodell ab. Werden die Parameter des Johnson-Cook-Modells aus Versuchen bei niedrigen Dehnraten abgeleitet, unterschätzt die Simulation die Prozesskräfte bei realen Schleifgeschwindigkeiten mitunter erheblich. Wir haben das Modell daher anhand von Ritzversuchen bei 35 Metern pro Sekunde kalibriert. Die Abweichung zwischen gemessenen und berechneten Kräften liegt nun unter zehn Prozent.","en":"Finite element simulation of single-grain scratching makes processes in the contact zone visible that are hardly accessible experimentally. However, the significance of the results depends crucially on the material model chosen. If the parameters of the Johnson-Cook model are derived from tests at low strain rates, the simulation sometimes considerably underestimates the process forces at real grinding speeds. We therefore calibrated the model using scratch tests at 35 metres per second. The deviation between measured and calculated forces is now below ten percent.","fragen":[{"frage":"Wovon hängt die Aussagekraft vor allem ab?","optionen":["Vom gewählten Materialmodell","Von der Rechenleistung","Von der Anzahl der Versuche"]},{"frage":"Was passiert bei Parametern aus niedrigen Dehnraten?","optionen":["Die Kräfte werden unterschätzt","Die Simulation dauert zu lange","Die Temperatur wird überschätzt"]},{"frage":"Wie groß ist die Abweichung nach der Kalibrierung?","optionen":["Unter zehn Prozent","Etwa 35 Prozent","Genau null"]}]},{"lvl":4.75,"titel":"Gehaltsverhandlung","text":"Ich verstehe Ihre Gehaltsvorstellung und schätze Ihre Erfahrung sehr. Allerdings liegt der genannte Betrag über dem Rahmen, den wir für diese Position vorgesehen haben. Wir könnten Ihnen ein Einstiegsgehalt von 72.000 Euro anbieten, zuzüglich einer variablen Prämie von bis zu zehn Prozent. Nach der Probezeit von sechs Monaten würden wir das Gehalt außerdem noch einmal überprüfen. Darüber hinaus übernehmen wir die Kosten für einen Intensivsprachkurs, und Sie könnten zwei Tage pro Woche mobil arbeiten. Wäre das eine Basis, auf der wir weitersprechen können?","en":"I understand your salary expectation and value your experience highly. However, the amount mentioned is above the range we planned for this position. We could offer you a starting salary of 72,000 euros plus a variable bonus of up to ten percent. After the six-month probation period we would also review the salary again. In addition, we cover the costs of an intensive language course, and you could work remotely two days a week. Would that be a basis for further discussion?","fragen":[{"frage":"Was bietet die Firma als Einstiegsgehalt an?","optionen":["72.000 Euro plus Prämie","Genau die Gehaltsvorstellung","60.000 Euro ohne Prämie"]},{"frage":"Wann wird das Gehalt erneut überprüft?","optionen":["Nach der Probezeit","Nach zwei Jahren","Gar nicht"]},{"frage":"Welche weitere Leistung wird angeboten?","optionen":["Ein Intensivsprachkurs","Ein Firmenwagen","Eine Wohnung"]}]}];
 /* ================= Helpers ================= */
 const $ = id => document.getElementById(id);
 function h(tag, attrs, ...kids){
@@ -779,7 +790,8 @@ function spk(text, lang, label){
   b.addEventListener("click", ev => { ev.preventDefault(); ev.stopPropagation(); speak(text, lang || "de-DE", b); });
   return b;
 }
-function say(text, cls, audio){ return h("div",{class:"say"}, h("div",{class:"t"+(cls?" "+cls:"")}, text), spk(audio || text, "de-DE")); }
+function wordify(text){ return String(text == null ? "" : text).split(/([A-Za-zÄÖÜäöüß]+(?:-[A-Za-zÄÖÜäöüß]+)*)/).map((p, i) => i % 2 === 1 && p.length > 1 ? h("span",{class:"w"}, p) : p); }
+function say(text, cls, audio){ return h("div",{class:"say"}, h("div",{class:"t"+(cls?" "+cls:"")}, wordify(text)), spk(audio || text, "de-DE")); }
 function enLine(text){ return text ? h("div",{class:"en-line"}, h("div",{class:"t"}, h("b",null,"EN"), text), spk(text, "en-GB")) : null; }
 function renderTtsBars(){
   document.querySelectorAll("[data-ttsbar]").forEach(bar => {
@@ -852,6 +864,8 @@ async function addItem(data){
     category: normCat(data.category), kind, source: data.source || "manuell", created: now, due: now,
     interval: 0, ease: 2.5, reps: 0, lapses: kind==="fehler"?1:0, seen: kind==="fehler"?1:0, wrong: kind==="fehler"?1:0, last: 0 };
   if (data.detail && typeof data.detail === "object") it.detail = data.detail;
+  if (data.lemma) it.lemma = str(data.lemma, 120);
+  if (data.word && typeof data.word === "object") it.word = data.word;
   if (state.db) await dbw(state.db.collection(itemsPath()).add(it));
   else { state.items.push({ id: "l"+now+Math.random().toString(36).slice(2,6), ...it }); renderLists(); }
 }
@@ -979,8 +993,18 @@ function exercisePlan(mode){
     if (!list.length) list.push(...weakC);
     list.forEach(c => add(c, "strong", list.length === 1 ? 6 : list.length === 2 ? 3 : 2));
   } else {
-    weakC.forEach(c => add(c, "weak", weakC.length === 1 ? 4 : 2));
-    if (f.strong) add(f.strong, "strong", 2); else add(weakC[0], "weak", 2);
+    /* The weakest category gets the most tasks; weight falls off exponentially with confidence (−63 % per 10 points).
+       Categories at ≥ 75 % confidence are trained half a level higher. */
+    const cats = activeCats().length ? activeCats() : weakC;
+    const mMin = Math.min(...cats.map(c => node("cat", c).m));
+    const ws = cats.map(c => { const nd = node("cat", c); return { c, m: nd.m, w: Math.exp(-(nd.m - mMin) / 0.1) }; });
+    const tot = ws.reduce((a, x) => a + x.w, 0), N = 6;
+    ws.forEach(x => { x.q = x.w / tot * N; x.k = Math.floor(x.q); });
+    let left = N - ws.reduce((a, x) => a + x.k, 0);
+    ws.slice().sort((a, b) => (b.q - b.k) - (a.q - a.k)).forEach(x => { if (left > 0){ x.k++; left--; } });
+    const best = ws.slice().sort((a, b) => b.m - a.m)[0];
+    if (best && best.m >= 0.7 && !best.k){ const donor = ws.filter(x => x.k > 1).sort((a, b) => b.m - a.m)[0] || ws.filter(x => x.k).sort((a, b) => b.m - a.m)[0]; if (donor){ donor.k--; best.k = 1; } }
+    ws.sort((a, b) => a.m - b.m).forEach(x => { if (x.k) add(x.c, x.m >= 0.7 ? "strong" : "weak", x.k); });
   }
   return plan.slice(0, 6);
 }
@@ -1019,8 +1043,124 @@ function renderFocus(){
       h("button",{class:"btn sm" + (role === "strong" ? "" : " primary"),type:"button",onclick:()=>{ showView("training"); genExercises(role === "strong" ? "strong" : "weak"); }},"Üben"),
       h("div",{class:"pb"}, h("b",{style:"width:" + pct + "%;background:" + (role === "strong" ? "var(--good)" : "var(--bad)")})));
   };
-  host.replaceChildren(...f.weak.map(c => row(c, "weak")), f.strong ? row(f.strong, "strong") : h("div",{class:"pl"}, h("div",{class:"mn"},"Noch keine Stärke über 70 % Sicherheit – sobald eine Kategorie sicher sitzt, wird sie hier gesteigert.")));
+  host.replaceChildren(...f.weak.map(c => row(c, "weak")), weakWordsRow() || "", f.strong ? row(f.strong, "strong") : h("div",{class:"pl"}, h("div",{class:"mn"},"Noch keine Stärke über 70 % Sicherheit – sobald eine Kategorie sicher sitzt, wird sie hier gesteigert.")));
   $("focusMeta").textContent = "Stand " + new Date().toLocaleDateString("de-DE",{day:"2-digit",month:"2-digit"});
+}
+
+/* ================= Word lookup: tap any word in a German sentence ================= */
+function wcache(){ try { return JSON.parse(localStorage.getItem("fd.wcache") || "{}"); } catch(e){ return {}; } }
+function wcacheSet(k, v){ try { const c = wcache(); c[k] = v; const ks = Object.keys(c); while (ks.length > 300) delete c[ks.shift()]; localStorage.setItem("fd.wcache", JSON.stringify(c)); } catch(e){} }
+function closeSheet(){ const s = document.getElementById("wsheet"); if (s) s.remove(); }
+function sanitizeWord(r){
+  const m = (Array.isArray(r.bedeutungen) ? r.bedeutungen : []).slice(0,5).map(b => ({ de: str(b && b.de,200), en: str(b && b.en,120), fa: str(b && b.fa,160) })).filter(b => b.de || b.en);
+  const ex = (Array.isArray(r.beispiele) ? r.beispiele : []).slice(0,4).map(b => ({ de: str(b && b.de,300), en: str(b && b.en,300) })).filter(b => b.de);
+  return { lemma: str(r.lemma,80), wortart: str(r.wortart,30), plural: str(r.plural,80), formen: str(r.formen,120), bedeutungen: m, imSatz: Math.round(num(r.im_satz,0)), beispiele: ex, wendungen: (Array.isArray(r.wendungen) ? r.wendungen : []).slice(0,3).map(x => str(x,120)) };
+}
+function wordCardExists(lemma){ const l = norm(lemma).replace(/^(der|die|das) /, ""); return state.items.some(it => it.lemma && norm(it.lemma).replace(/^(der|die|das) /, "") === l); }
+async function addWordCard(e, ctx){
+  const baseW = e.lemma.replace(/^(der|die|das)\s+/i, "");
+  const noun = /^(der|die|das)\s/i.test(e.lemma) || e.wortart === "Nomen";
+  await addItem({ front: noun ? "Artikel, Plural, Bedeutung: " + baseW : "Bedeutung: " + e.lemma,
+    back: e.lemma + (e.plural ? ", " + e.plural : "") + (e.formen ? " (" + e.formen + ")" : "") + (e.bedeutungen.length ? " – " + e.bedeutungen.slice(0,3).map(b => b.de).filter(Boolean).join("; ") : ""),
+    satz: ctx && words(ctx).length <= 30 ? ctx : (e.beispiele[0] ? e.beispiele[0].de : ""),
+    en: e.bedeutungen.map(b => b.en).filter(Boolean).join("; "), fa: e.bedeutungen.map(b => b.fa).filter(Boolean).join("، "),
+    note: e.wendungen.join(" · "), category: "fachwort", kind: "vokabel", source: "Wort-Tipp", lemma: e.lemma, word: e });
+}
+function renderWord(host, e, word, ctx, noAdd){
+  const head = h("div",null, h("div",{class:"say"}, h("div",{class:"t",style:"font-size:20px;font-weight:600"}, e.lemma || word), spk(e.lemma || word, "de-DE")),
+    h("div",{class:"muted",style:"font-size:13px"}, [e.wortart, e.plural ? "Plural: " + e.plural : "", e.formen].filter(Boolean).join(" · ")));
+  const means = e.bedeutungen.length ? h("div",null, h("div",{class:"qn",style:"margin-bottom:6px"},"Bedeutungen"), h("div",{class:"list"}, ...e.bedeutungen.map((b, i) => h("div",{class:"li"},
+    h("div",{class:"a"}, h("div",{class:"q"}, (i+1) + ". " + b.de), b.en ? h("div",{class:"r"}, "EN: " + b.en) : null, b.fa ? fa(b.fa) : null),
+    h("div",{class:"x"}, e.imSatz === i + 1 ? h("span",{class:"chip acc"},"im Satz") : null))))) : null;
+  const ctxNode = ctx && norm(ctx) !== norm(word) ? h("div",null, h("div",{class:"qn",style:"margin-bottom:6px"},"Dein Satz"), say(ctx)) : null;
+  const exs = e.beispiele.length ? h("div",null, h("div",{class:"qn",style:"margin-bottom:6px"},"Beispiele"), ...e.beispiele.map(b => h("div",{style:"margin-bottom:8px"}, say(b.de), b.en ? h("div",{class:"muted",style:"font-size:13px"}, b.en) : null))) : null;
+  const wend = e.wendungen.length ? h("div",null, h("div",{class:"qn",style:"margin-bottom:6px"},"Typische Wendungen"), ...e.wendungen.map(w => say(w))) : null;
+  let add = null;
+  if (!noAdd){
+    const exists = wordCardExists(e.lemma);
+    const b = h("button",{class:"btn primary",type:"button",disabled: exists}, exists ? "Schon in deinen Karten ✓" : "Zu Karteikarten hinzufügen");
+    b.addEventListener("click", async () => { b.disabled = true; try { await addWordCard(e, ctx); b.textContent = "Gespeichert ✓"; toast("Karte gespeichert: " + e.lemma); } catch(err){ b.disabled = false; toast("Speichern fehlgeschlagen"); } });
+    add = h("div",{class:"row"}, b);
+  }
+  host.replaceChildren(head, add, means, ctxNode, exs, wend);
+}
+function bankExamples(word){
+  const esc = word.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+  const re = new RegExp("(^|[^A-Za-zÄÖÜäöüß])" + esc + "([^A-Za-zÄÖÜäöüß]|$)", "i");
+  const out = [];
+  for (const rows of Object.values(BANK)) for (const r of rows) if (out.length < 4 && re.test(r[3]) && !out.some(o => o.de === r[3])) out.push({ de: r[3], en: r[4] });
+  for (const it of state.items) if (out.length < 6 && it.satz && re.test(it.satz) && !out.some(o => o.de === it.satz)) out.push({ de: it.satz, en: it.en || "" });
+  return out;
+}
+function renderWordOffline(host, word, ctx){
+  const ex = bankExamples(word);
+  const art = h("input",{type:"text",placeholder:"Grundform mit Artikel/Plural (optional), z. B. die Messung, -en"});
+  const en = h("input",{type:"text",placeholder:"Bedeutung auf Englisch"});
+  const fai = h("input",{type:"text",placeholder:"معنی به فارسی",dir:"rtl",lang:"fa",style:"font-family:var(--f-fa)"});
+  const exists = wordCardExists(word);
+  const b = h("button",{class:"btn primary",type:"button",disabled: exists}, exists ? "Schon in deinen Karten ✓" : "Zu Karteikarten hinzufügen");
+  b.addEventListener("click", async () => {
+    if (!en.value.trim() && !fai.value.trim()){ toast("Bitte eine Bedeutung eintragen."); return; }
+    b.disabled = true;
+    try { await addItem({ front: "Bedeutung: " + word, back: (art.value.trim() || word) + " – " + (en.value.trim() || fai.value.trim()), satz: ctx || "", en: en.value.trim(), fa: fai.value.trim(), category: "fachwort", kind: "vokabel", source: "Wort-Tipp", lemma: art.value.trim() || word }); b.textContent = "Gespeichert ✓"; toast("Karte gespeichert"); }
+    catch(e){ b.disabled = false; toast("Speichern fehlgeschlagen"); }
+  });
+  host.replaceChildren(
+    h("div",{class:"help"}, window.FD_STANDALONE ? "Ohne KI-Schlüssel gibt es kein Wörterbuch. Trag die Bedeutung selbst ein – in der Claude-Version kommen alle Bedeutungen automatisch." : "Die automatischen Bedeutungen brauchen die KI.",
+      h("div",{class:"fa-hint",style:"margin:4px 0 0"}, "بدون هوش مصنوعی، معنی را خودت وارد کن. در نسخهٔ Claude همهٔ معانی خودکار نمایش داده می‌شوند.")),
+    h("div",{class:"form"}, art, en, fai), h("div",{class:"row"}, b),
+    ctx && norm(ctx) !== norm(word) ? h("div",null, h("div",{class:"qn",style:"margin-bottom:6px"},"Dein Satz"), say(ctx)) : null,
+    ex.length ? h("div",null, h("div",{class:"qn",style:"margin-bottom:6px"},"Weitere Beispiele"), ...ex.map(x => h("div",{style:"margin-bottom:8px"}, say(x.de), x.en ? h("div",{class:"muted",style:"font-size:13px"}, x.en) : null))) : null);
+}
+async function openWord(word, ctx){
+  closeSheet();
+  word = String(word).replace(/^-+|-+$/g, "");
+  const body = h("div",{style:"display:grid;gap:14px"});
+  const sheet = h("div",{id:"wsheet",class:"sheet-bg"},
+    h("div",{class:"sheet",role:"dialog","aria-label":"Wort " + word},
+      h("div",{class:"row",style:"justify-content:space-between"}, h("div",{class:"qn"},"Wörterbuch"), h("button",{class:"btn sm ghost",type:"button",onclick:closeSheet},"Schließen")),
+      body));
+  sheet.addEventListener("click", ev => { if (ev.target === sheet) closeSheet(); });
+  document.body.append(sheet);
+  track("w");
+  const key = norm(word);
+  const cached = wcache()[key];
+  if (cached){ renderWord(body, cached, word, ctx); return; }
+  if (!aiReady()){ body.append(h("div",{class:"say"}, h("div",{class:"t",style:"font-size:20px;font-weight:600"}, word), spk(word, "de-DE"))); const sub = h("div",{style:"display:grid;gap:14px"}); body.append(sub); renderWordOffline(sub, word, ctx); return; }
+  body.replaceChildren(h("div",{class:"say"}, h("div",{class:"t",style:"font-size:20px;font-weight:600"}, word), spk(word, "de-DE")), h("div",{class:"muted"},"Bedeutungen werden geladen …"));
+  try {
+    const r = await ask(`Wörterbuch-Eintrag für einen Deutschlerner. ${profileLine()}
+Wort, wie es im Text steht: "${word}"
+Satz, in dem es steht: "${str(ctx,400)}"
+Antworte NUR mit JSON: {"lemma":"Grundform; bei Nomen mit Artikel (z. B. die Schleifscheibe)","wortart":"Nomen|Verb|Adjektiv|Adverb|Präposition|Konjunktion|Pronomen|Artikel|andere","plural":"Pluralform bei Nomen, sonst leer","formen":"bei Verben: Präteritum und Perfekt (z. B. schliff, hat geschliffen); sonst leer","bedeutungen":[{"de":"kurze Erklärung auf einfachem Deutsch","en":"englische Übersetzung","fa":"persische Übersetzung"}],"im_satz":Nummer der Bedeutung im gegebenen Satz (1-basiert),"beispiele":[{"de":"Beispielsatz, möglichst aus Technik oder Beruf","en":"englisch"}],"wendungen":["typische Kollokation"]}
+Alle wichtigen Bedeutungen (höchstens 5), genau 3 Beispiele, höchstens 3 Wendungen. Prüfe Genus und Plural doppelt.`);
+    if (!r || !r.lemma) throw { code: "invalid_json" };
+    const e = sanitizeWord(r); wcacheSet(key, e);
+    if (document.body.contains(body)) renderWord(body, e, word, ctx);
+  } catch(err){
+    if (!document.body.contains(body)) return;
+    const sub = h("div",{style:"display:grid;gap:14px"});
+    body.replaceChildren(h("div",{class:"err"}, sampleErr(err)), sub); renderWordOffline(sub, word, ctx);
+  }
+}
+document.addEventListener("click", ev => {
+  const w = ev.target && ev.target.closest && ev.target.closest(".w"); if (!w) return;
+  ev.preventDefault(); ev.stopPropagation();
+  const t = w.closest(".t"); openWord(w.textContent, t ? t.textContent.replace(/^„|“$/g, "") : w.textContent);
+}, true);
+document.addEventListener("keydown", ev => { if (ev.key === "Escape") closeSheet(); });
+
+/* ================= Weak words & sentences (automatic) =================
+   Score = smoothed error rate, weighted towards recent mistakes. */
+function wordScore(it){ const rate = ((it.wrong||0) + 1) / ((it.seen||0) + 2); const rec = it.last ? Math.exp(-(Date.now() - it.last) / (14*DAY)) : 0.5; return rate * (0.6 + 0.4*rec) + Math.min(5, it.lapses||0) * 0.04; }
+function weakItems(n, onlyWords){ return state.items.filter(it => (it.wrong||0) > 0 && (!onlyWords || it.kind === "vokabel" || catSkill(it.category) === "w")).sort((a,b) => wordScore(b) - wordScore(a)).slice(0, n); }
+function wordDrills(n){ return weakItems(n).map(it => ({ front: it.front, back: it.back, satz: it.satz, en: it.en, note: it.note, fa: it.fa, category: normCat(it.category), d: node("cat", normCat(it.category)).d, role: "wort", cardId: it.id })); }
+function errPct(it){ return Math.round(100 * (it.wrong||0) / Math.max(1, it.seen||0)); }
+function weakWordsRow(){
+  const ww = weakItems(6, true); if (!ww.length) return null;
+  return h("div",{class:"pl"},
+    h("div",null, h("div",{class:"nm"}, "Schwache Wörter", h("span",{class:"chip bad"},"öfter")), h("div",{class:"chips",style:"margin-top:6px"}, ...ww.map(it => h("span",{class:"chip"}, String(it.lemma || it.back).slice(0,28) + " · " + errPct(it) + " %")))),
+    h("button",{class:"btn sm primary",type:"button",onclick:()=>startSession("weakwords")},"Üben"));
 }
 
 /* ================= Analysis & SRS ================= */
@@ -1109,6 +1249,7 @@ async function toggleDetail(host, btn, src, itemId, openKey){
   track("g");
   if (host.dataset.ready === "1" || host.dataset.loading === "1") return;
   const live = itemId ? (state.items.find(x=>x.id===itemId) || src) : src;
+  if (live.word && live.word.lemma){ renderWord(host, live.word, live.lemma, live.satz, true); host.dataset.ready = "1"; return; }
   if (live.detail && live.detail.regel_de && live.detail.regel_fa){ renderDetail(host, live.detail); host.dataset.ready = "1"; return; }
   if (!aiReady()){ renderOfflineDetail(host, live); host.dataset.ready = "1"; return; }
   host.dataset.loading = "1";
@@ -1159,8 +1300,8 @@ function errorList(errs, source){
 function critRow(o, labels){ return h("div",{class:"crit"}, ...labels.map(([k,l]) => h("div",null, h("b",null, o[k] != null ? String(Math.max(1,Math.min(5,Math.round(num(o[k],0))))) + "/5" : "–"), l))); }
 
 /* ================= Rendering: Heute ================= */
-const SK_START = { w: () => startSession("words"), g: () => startSession("rules"), h: () => { showView("sprechen"); $("startDict").focus(); }, s: () => { showView("sprechen"); $("genSpeak").focus(); }, sc: () => { showView("schreiben"); $("genWrite").focus(); } };
-const SK_DESC = { w:"Fachbegriffe & Artikel (Karten)", g:"Regeln & KI-Übungen", h:"Hördiktat & Hörverstehen", s:"Sprechaufgabe & Nachsprechen", sc:"Schreibaufgabe mit Korrektur" };
+const SK_START = { w: () => startSession("words"), g: () => startSession("rules"), h: () => { showView("sprechen"); $("genListen").scrollIntoView({block:"center"}); }, s: () => { showView("sprechen"); $("genSpeak").focus(); }, sc: () => { showView("schreiben"); $("genWrite").focus(); } };
+const SK_DESC = { w:"Fachbegriffe & Artikel (Karten)", g:"Regeln & adaptive Übungen", h:"Hörverstehen & Hördiktat", s:"Sprechaufgabe & Nachsprechen", sc:"Schreibaufgabe mit Korrektur" };
 function renderHome(){
   const p = state.profile;
   $("todayDate").textContent = new Date().toLocaleDateString("de-DE",{weekday:"short",day:"2-digit",month:"2-digit"});
@@ -1252,6 +1393,8 @@ function renderProgress(){
   $("minChart").replaceChildren(svg2, h("div",{class:"legend"}, ...SK_KEYS.map(k => h("span",null, h("i",{style:"background:"+SK_COLOR[k]}), SKILLS[k])), h("span",null,"– – Tagesziel " + goal + " Min")));
   // skills (adaptive)
   $("skillBars").replaceChildren(...SK_KEYS.map(k => { const r = adaptRow("skill", k); r.style.cursor = "default"; return r; }));
+  const hard = weakItems(10);
+  $("hardList").replaceChildren(...(hard.length ? hard.map(it => itemRow(it, "hard:", h("div",{style:"margin-top:4px;display:flex;gap:6px;flex-wrap:wrap"}, h("span",{class:"chip bad"}, errPct(it) + " % falsch"), h("span",{class:"chip"}, catName(it.category))))) : [h("div",{class:"empty"},"Noch keine Fehler erfasst.")]));
   renderCats();
 }
 function itemRow(it, keyPrefix, extra){
@@ -1295,6 +1438,7 @@ function startSession(mode, cat){
   if (mode === "due") q = dueItems().sort((a,b)=> (node("cat",normCat(a.category)).m - node("cat",normCat(b.category)).m) || ((a.due||0)-(b.due||0))).slice(0,30);
   else if (mode === "words") q = dueItems(isWord).concat(shuffle(state.items.filter(it => isWord(it) && (it.due||0) > Date.now()))).slice(0,20);
   else if (mode === "rules") q = dueItems(it => !isWord(it)).concat(shuffle(state.items.filter(it => !isWord(it) && (it.due||0) > Date.now()))).slice(0,20);
+  else if (mode === "weakwords") q = weakItems(15, true);
   else if (mode === "focus"){ const k = cat || todayFocus().weak[0] || (weakest()[0]||{}).key; if (!k) return; q = state.items.filter(it=>normCat(it.category)===k).sort((a,b)=>((b.lapses||0)-(a.lapses||0)) || ((a.due||0)-(b.due||0))).slice(0,20); }
   if (!q.length){ toast("Keine passenden Karten"); return; }
   state.session = { queue: q.map(i=>i.id), total: q.length, done: 0, shown: false, right: 0, spoken: "" };
@@ -1317,7 +1461,7 @@ function renderCard(){
   const frontSpk = spk(it.front, "de-DE", "Aufgabe vorlesen");
   const card = h("div",{class:"card"},
     h("div",{class:"strip"}, h("span",null, catName(it.category)), h("span",null, (s.done+1) + " / " + s.total)),
-    h("div",{class:"front"}, h("div",{class:"say"}, h("div",{class:"t"}, it.front), frontSpk)));
+    h("div",{class:"front"}, h("div",{class:"say"}, h("div",{class:"t"}, wordify(it.front)), frontSpk)));
   let backSpk = null;
   if (!s.shown){
     card.append(h("div",{style:"padding:0 16px 16px"}, h("button",{class:"btn primary",type:"button",style:"width:100%",id:"revealBtn",onclick:()=>{ s.shown = true; track(catSkill(it.category)); renderCard(); }},"Lösung zeigen")));
@@ -1325,8 +1469,8 @@ function renderCard(){
     backSpk = spk(it.satz || it.back, "de-DE", "Lösung vorlesen");
     card.append(h("div",{class:"back"},
       h("div",{class:"say"}, h("div",{class:"t right"}, it.back), backSpk),
-      it.satz && norm(it.satz) !== norm(it.back) ? h("div",{class:"full"}, "„" + it.satz + "“") : null,
-      enLine(it.en), ruleBlock(it, it.id, null)));
+      it.satz && norm(it.satz) !== norm(it.back) ? h("div",{class:"full t"}, "„", wordify(it.satz), "“") : null,
+      enLine(it.en), it.fa ? fa(it.fa) : null, ruleBlock(it, it.id, null)));
     const g = (q, label, cls) => h("button",{type:"button",class:cls,onclick:()=>grade(it,q)}, label, h("small",null, fmtInterval(it,q)));
     card.append(h("div",{class:"grades"}, g(0,"Nochmal","g0"), g(3,"Schwer",""), g(4,"Gut",""), g(5,"Leicht","g5")));
   }
@@ -1364,12 +1508,14 @@ Skala: 1 = A1, 2 = A2, 3 = B1, 4 = B2, 5 = C1, 6 = C2 erreicht; Nachkommastellen
 ${plan.map((x,i) => (i+1) + ". " + catName(x.cat) + " – Niveau " + lvlFine(x.d) + " – " + (x.role === "strong" ? "Herausforderung: anspruchsvollere Strukturen und Wortschatz genau dieses Niveaus" : "Festigung: eine typische Fehlerquelle sicher machen")).join("\n")}
 Bisherige Fehler in diesen Kategorien:
 ${examples}
+Schwache Wörter (baue sie, wo möglich, in die Aufgaben ein): ${weakItems(8, true).map(it => it.lemma || it.back).join("; ") || "(keine)"}
 Kontext: sein Fachgebiet und seine Interessen. Mische Lückentext (Lücke als ___), Satzumbau und Übersetzung aus dem Englischen. Das Niveau jeder Aufgabe muss dem angegebenen GER-Niveau entsprechen (Satzlänge, Struktur, Wortschatz). Kurze, eindeutige Lösungen.
 Antworte NUR mit einem JSON-Array in derselben Reihenfolge: [{"frage":"Aufgabe mit Anweisung","loesung":"richtige Antwort","satz":"vollständiger richtiger Satz","englisch":"englische Übersetzung","erklaerung":"Regel, max. 15 Wörter"}]`, { signal: exCtl.signal });
     const raw = (Array.isArray(arr) ? arr : []).filter(x => x && x.frage && x.loesung).slice(0, plan.length);
     const list = raw.map((x,i) => { const pl = plan[i] || plan[plan.length-1]; return { front:str(x.frage,600), back:str(x.loesung,400), satz:str(x.satz,600), en:str(x.englisch,600), note:str(x.erklaerung,300), category: pl.cat, d: pl.d, role: pl.role }; });
     if (!list.length) throw { code: "invalid_json" };
-    $("exStatus").textContent = "Antworte, dann prüfen. Jede Antwort passt deine Stufe an.";
+    $("exStatus").textContent = "Antworte, dann prüfen. Jede Antwort passt deine Stufe an. Tippe auf ein Wort für seine Bedeutungen.";
+    if (mode !== "strong") list.push(...wordDrills(2));
     $("exHost").replaceChildren(...list.map((x,i) => exerciseEl(x,i)));
   } catch(e){
     if (e && ["no_key","bad_key","no_credit","upstream_error","rate_limited","bad_model"].includes(e.code)){ offlineExercises(mode, sampleErr(e)); }
@@ -1386,15 +1532,16 @@ function exerciseEl(x, i){
     const a = norm(inp.value); const auto = !!a && (a === norm(x.back) || (x.satz && a === norm(x.satz)));
     const solSpk = spk(x.satz || x.back, "de-DE", "Lösung vorlesen");
     const done = async ok => { out.querySelectorAll(".judge button").forEach(b=>b.disabled=true); logReview(ok); adaptEx(x, ok);
+      if (x.cardId){ const it = state.items.find(i => i.id === x.cardId); if (it){ const patch = schedule(it, ok ? 4 : 0); Object.assign(it, patch); updateItem(it.id, patch).catch(()=>{}); } out.append(h("div",{class: ok ? "ok" : "err",style:"margin-top:6px"}, ok ? "Richtig – diese Karte kommt jetzt seltener." : "Diese Karte kommt bald wieder.")); return; }
       if (!ok){ try { await addItem({ ...x, kind:"fehler", source:"KI-Übung" }); out.append(h("div",{class:"err",style:"margin-top:6px"},"Als Karte gespeichert.")); } catch(e){ out.append(h("div",{class:"err"},"Karte konnte nicht gespeichert werden.")); } }
       else out.append(h("div",{class:"ok",style:"margin-top:6px"},"Richtig.")); };
-    out.replaceChildren(h("div",{class:"sol"}, h("div",{class:"say"}, h("div",{class:"t right"}, x.back), solSpk), x.satz && norm(x.satz) !== norm(x.back) ? h("div",{style:"font-size:14px;margin-top:4px"}, "„" + x.satz + "“") : null, enLine(x.en), ruleBlock(x, null, null)),
+    out.replaceChildren(h("div",{class:"sol"}, h("div",{class:"say"}, h("div",{class:"t right"}, x.back), solSpk), x.satz && norm(x.satz) !== norm(x.back) ? h("div",{class:"t",style:"font-size:14px;margin-top:4px"}, "„", wordify(x.satz), "“") : null, enLine(x.en), x.fa ? fa(x.fa) : null, ruleBlock(x, null, null)),
       auto ? null : h("div",{class:"row judge",style:"margin-top:8px"}, h("button",{class:"btn sm",type:"button",onclick:()=>done(true)},"War richtig"), h("button",{class:"btn sm",type:"button",onclick:()=>done(false)},"War falsch")));
     if (TTS.auto) speak(x.satz || x.back, "de-DE", solSpk);
     if (auto) done(true);
   });
   inp.addEventListener("keydown", ev => { if (ev.key === "Enter" && !check.disabled){ ev.preventDefault(); check.click(); } });
-  return h("div",{class:"box anim"}, h("div",{class:"qn"}, "Aufgabe " + (i+1) + " · " + catName(x.category) + (x.d ? " · " + lvlFine(x.d) + (x.role === "strong" ? " ↑" : "") : "")), h("div",{class:"say"}, h("div",{class:"t"}, x.front), spk(x.front, "de-DE", "Aufgabe vorlesen")), inp, h("div",{class:"row"}, check), out);
+  return h("div",{class:"box anim"}, h("div",{class:"qn"}, "Aufgabe " + (i+1) + " · " + catName(x.category) + (x.d ? " · " + lvlFine(x.d) + (x.role === "strong" ? " ↑" : "") + (x.role === "wort" ? " · Wiederholung schwacher Karte" : "") : "")), h("div",{class:"say"}, h("div",{class:"t"}, wordify(x.front)), spk(x.front, "de-DE", "Aufgabe vorlesen")), inp, h("div",{class:"row"}, check), out);
 }
 
 /* ================= Microphone (standalone app only) =================
@@ -1449,6 +1596,7 @@ function offlineExercises(mode, note){
   $("exStatus").replaceChildren(
     h("div",null, (note ? note + " " : "") + (mode === "strong" ? "Stärken steigern" : "Schwächen festigen") + " – aus der eingebauten Übungsbank (210 Aufgaben, A2–B2), passend zu deinen Stufen."),
     h("div",{style:"font-size:13px;margin-top:4px"}, window.FD_STANDALONE ? "Mit API-Schlüssel (Profil → KI-Schlüssel) bekommst du unbegrenzt neue, persönliche KI-Aufgaben." : ""));
+  if (mode !== "strong") list.push(...wordDrills(2));
   $("exHost").replaceChildren(...list.map((x, i) => exerciseEl(x, i)));
 }
 function selfCheck(res, muster, skill){
@@ -1565,7 +1713,7 @@ function runDrill(hostId, mode){
   step();
 }
 async function genListening(){
-  const st = $("lsStatus"); if (!aiReady()){ st.textContent = window.FD_STANDALONE ? "Hörtexte erzeugt die KI – dafür brauchst du den API-Schlüssel. Ohne Schlüssel: Hördiktat und Nachsprechen oben." : "Hörtexte brauchen die KI. Öffne die App über Claude."; return; }
+  const st = $("lsStatus"); if (!aiReady()){ offlineListening(); return; }
   $("genListen").disabled = true; st.textContent = "Hörtext wird erstellt …";
   try {
     const lv = taskLevel("h"); const r = await ask(`Erstelle einen Hörtext für das Hörverstehen, GER-Niveau ${lvlLabel(lv)}. ${profileLine()}
@@ -1573,8 +1721,18 @@ Thema aus seinen Interessen (zufällig, Zahl ${Math.floor(Math.random()*1000)}):
 Antworte NUR mit JSON: {"titel":"…","text":"…","text_en":"englische Übersetzung","fragen":[{"frage":"…","optionen":["…","…","…"],"richtig":0,"erklaerung":"kurz"}]} mit genau 3 Fragen; "richtig" ist der Index der richtigen Option.`);
     if (!r || !r.text || !Array.isArray(r.fragen)) throw { code: "invalid_json" };
     st.textContent = ""; r._d = lv; renderListening(r);
-  } catch(e){ st.textContent = sampleErr(e); }
+  } catch(e){ if (e && e.code === "cancelled") st.textContent = sampleErr(e); else { offlineListening(); st.textContent = sampleErr(e) + " Stattdessen ein Hörtext aus der Übungsbank."; } }
   finally { $("genListen").disabled = false; }
+}
+function offlineListening(){
+  const lv = taskLevel("h"); let used = {}; try { used = JSON.parse(localStorage.getItem("fd.lsUsed") || "{}"); } catch(e){}
+  const c = LISTEN_BANK.map((t, i) => ({ t, i, dist: Math.abs(t.lvl - lv), u: used[i] || 0 })).sort((a, b) => a.dist - b.dist);
+  const best = c.filter(x => x.dist <= c[0].dist + 0.51).sort((a, b) => (a.u - b.u) || (a.dist - b.dist))[0];
+  used[best.i] = Date.now(); try { localStorage.setItem("fd.lsUsed", JSON.stringify(used)); } catch(e){}
+  const t = best.t;
+  const fragen = t.fragen.map(q => { const order = shuffle(q.optionen.map((o, k) => k)); return { frage: q.frage, optionen: order.map(k => q.optionen[k]), richtig: order.indexOf(0), erklaerung: "" }; });
+  $("lsStatus").textContent = "Hörtext aus der Übungsbank (" + LISTEN_BANK.length + " Texte, A2–C1), passend zu deiner Hörstufe " + lvlLabel(lv) + ".";
+  renderListening({ titel: t.titel, text: t.text, text_en: t.en, fragen, _d: t.lvl });
 }
 function renderListening(r){
   const text = str(r.text, 2000); const play = spk(text, "de-DE", "Text vorlesen");
